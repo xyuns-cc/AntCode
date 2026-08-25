@@ -15,6 +15,7 @@ from antcode_core.common.security.worker_auth import (
     SOURCE_RATE_LIMIT_WINDOW_SECONDS,
     WorkerAuthVerifier,
 )
+from antcode_core.common.security.worker_auth_reasons import WorkerAuthReason
 
 from tests.unit.core.worker_auth_support import (
     CLIENT_IP,
@@ -50,7 +51,7 @@ async def test_signature_uses_shared_secret_and_nonce_services() -> None:
         nonce="nonce-1",
     )
 
-    assert await verifier.verify_signature_async(
+    reason = await verifier.verify_signature_async(
         WORKER_ID,
         method="POST",
         path=SIGNED_PATH,
@@ -60,6 +61,7 @@ async def test_signature_uses_shared_secret_and_nonce_services() -> None:
         signature=signature_headers["X-Signature"],
         version=signature_headers[WORKER_HTTP_SIGNATURE_HEADER],
     )
+    assert reason is WorkerAuthReason.OK
     assert claimed == [(WORKER_ID, "nonce-1")]
 
 
@@ -74,7 +76,7 @@ async def test_invalid_signature_does_not_consume_nonce() -> None:
 
     verifier = WorkerAuthVerifier(load_shared_secret, claim_nonce, RateLimiterSpy())
 
-    assert not await verifier.verify_signature_async(
+    reason = await verifier.verify_signature_async(
         WORKER_ID,
         method="POST",
         path=SIGNED_PATH,
@@ -84,6 +86,7 @@ async def test_invalid_signature_does_not_consume_nonce() -> None:
         signature="invalid",
         version="2",
     )
+    assert reason is WorkerAuthReason.SIGNATURE_INVALID
     assert claimed is False
 
 
@@ -103,7 +106,7 @@ async def test_replayed_nonce_is_rejected() -> None:
         nonce="nonce-1",
     )
 
-    assert not await verifier.verify_signature_async(
+    reason = await verifier.verify_signature_async(
         WORKER_ID,
         method="POST",
         path=SIGNED_PATH,
@@ -113,6 +116,7 @@ async def test_replayed_nonce_is_rejected() -> None:
         signature=headers["X-Signature"],
         version=headers[WORKER_HTTP_SIGNATURE_HEADER],
     )
+    assert reason is WorkerAuthReason.NONCE_REPLAY
 
 
 @pytest.mark.asyncio

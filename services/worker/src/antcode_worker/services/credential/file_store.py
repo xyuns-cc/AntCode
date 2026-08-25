@@ -47,6 +47,9 @@ class FileCredentialStore(CredentialStore):
         """检查凭证文件是否存在"""
         return self._credential_file.exists()
 
+    def describe_location(self) -> str:
+        return str(self._credential_file)
+
     def load(self) -> dict[str, Any] | None:
         """
         从文件加载凭证（同步版本）

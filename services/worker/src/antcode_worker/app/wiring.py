@@ -12,6 +12,8 @@ from typing import Any
 
 from loguru import logger
 
+from antcode_worker.app.control_plane_rejection import control_plane_error
+
 
 @dataclass
 class Container:
@@ -306,13 +308,15 @@ def _prepare_transport_bootstrap(config: Any, transport_mode: str) -> _Transport
     )
 
 
-def _require_control_credentials(
-    config: Any,
-    credential_service: Any,
-    credentials: Any,
-    *,
-    required: bool,
-) -> Any:
+def _require_control_credentials(config: Any, credential_service: Any, credentials: Any, *, required: bool) -> Any:
+    """本地有一份结构合法的凭据就直接放行，不向控制面求证。
+
+    这是**刻意**的：控制面若拒绝这份身份（例如库被重建后 worker_id 已不存在），
+    正确动作是带着可执行指令硬失败，而不是自动拿安装 Key 重注册——安装 Key 一次性
+    （ACK 后恢复窗口永久关闭，库重建后 Key 记录本身也没了），且"被拒就自己回来"
+    会打穿管理员删除/停用 Worker 这条撤销手段。真正的报错在 Direct ACL 签发那一步
+    由 ``control_plane_rejection`` 给出，见该模块的 ``_REREGISTRATION_IS_MANUAL``。
+    """
     if not required or (credentials and credentials.is_valid()):
         return credentials
     credentials = _register_by_install_key(config=config, credential_service=credential_service)
@@ -393,12 +397,7 @@ def _register_by_install_key(
     return register_by_install_key(config, credential_service)
 
 
-def _issue_direct_redis_acl(
-    *,
-    config: Any,
-    credentials: Any | None,
-    credential_service: Any,
-):
+def _issue_direct_redis_acl(*, config: Any, credentials: Any | None, credential_service: Any):
     """Rotate Direct Redis ACL credentials through the signed Web API."""
     credential_service.ensure_durable_writable()
     with credential_service.registration_session():
@@ -445,7 +444,9 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
     )
     with client:
         response = client.post(url, content=request_body, headers=headers)
-    response_body = _require_success_response(response, operation="Direct Redis ACL 签发")
+    response_body = _require_success_response(
+        response, operation="Direct Redis ACL 签发", credentials_at=credential_service.store.describe_location()
+    )
     data = response_body.get("data") or {}
     username = str(data.get("redis_username") or "")
     password = str(data.get("redis_password") or "")
@@ -457,14 +458,13 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
     return updated
 
 
-def _require_success_response(response: Any, *, operation: str) -> dict[str, Any]:
+def _require_success_response(response: Any, *, operation: str, credentials_at: str) -> dict[str, Any]:
     try:
         body = response.json()
     except ValueError as exc:
         raise RuntimeError(f"{operation}返回非 JSON 响应") from exc
     if response.status_code >= 400:
-        detail = body.get("message") or body.get("detail") if isinstance(body, dict) else None
-        raise RuntimeError(detail or f"{operation}失败 (HTTP {response.status_code})")
+        raise control_plane_error(body, response.status_code, operation=operation, credentials_at=credentials_at)
     if not isinstance(body, dict) or not body.get("success"):
         message = body.get("message") if isinstance(body, dict) else None
         raise RuntimeError(message or f"{operation}失败")

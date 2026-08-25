@@ -22,6 +22,7 @@ from antcode_core.common.security import (
 from antcode_core.common.security.api_key import hash_api_key
 from antcode_core.common.security.network_source import extract_client_ip
 from antcode_core.common.security.secret_box import secret_box
+from antcode_core.common.security.worker_auth_reasons import WorkerAuthReason, rejection_detail
 from antcode_core.infrastructure.redis.rate_limiter import redis_rate_limiter
 
 TIMESTAMP_TOLERANCE_SECONDS = 300
@@ -44,6 +45,18 @@ TRUSTED_PROXIES_ENV = "ANTCODE_TRUSTED_PROXIES"
 
 class RateLimiter(Protocol):
     async def is_allowed(self, identifier: str, limit: int, period: int) -> bool: ...
+
+
+class WorkerAuthRejected(HTTPException):
+    """带结构化 ``error_code`` 的 Worker 认证拒绝。
+
+    ``error_code`` 由 web_api 的 HTTP 异常处理器透出到响应体 ``data.error_code``，
+    Worker 侧据此翻译成运维动作，无需解析中文文案。
+    """
+
+    def __init__(self, reason: WorkerAuthReason) -> None:
+        super().__init__(status_code=status.HTTP_401_UNAUTHORIZED, detail=rejection_detail(reason))
+        self.error_code = reason.value
 
 
 SecretLoader = Callable[[str], Awaitable[str | None]]
@@ -150,18 +163,16 @@ class WorkerAuthVerifier:
         nonce: str,
         signature: str,
         version: str,
-    ) -> bool:
+    ) -> WorkerAuthReason:
+        """返回具体拒绝原因而非 bool：五种拒绝的运维动作完全不同。日志由
+        ``verify_request`` 集中打一条，避免同一次拒绝在两层各记一遍。"""
         if version != WORKER_HTTP_SIGNATURE_VERSION:
-            logger.warning(f"Worker HMAC 签名版本无效: {worker_id}")
-            return False
+            return WorkerAuthReason.SIGNATURE_VERSION_UNSUPPORTED
         secret = await self._secret_loader(worker_id)
         if secret is None:
-            logger.warning(f"Worker HMAC secret 不存在: {worker_id}")
-            return False
+            return WorkerAuthReason.IDENTITY_UNKNOWN
         if not self._timestamp_is_valid(timestamp):
-            logger.warning(f"Worker HMAC 时间戳过期: {worker_id}")
-            return False
-
+            return WorkerAuthReason.TIMESTAMP_SKEW
         if not verify_hmac_signature(
             body,
             secret,
@@ -173,12 +184,10 @@ class WorkerAuthVerifier:
             version=version,
             max_age_seconds=TIMESTAMP_TOLERANCE_SECONDS,
         ):
-            logger.warning(f"Worker HMAC 签名无效: {worker_id}")
-            return False
+            return WorkerAuthReason.SIGNATURE_INVALID
         if not await self._nonce_claimer(worker_id, nonce):
-            logger.warning(f"Worker HMAC nonce 重放: {worker_id}")
-            return False
-        return True
+            return WorkerAuthReason.NONCE_REPLAY
+        return WorkerAuthReason.OK
 
     async def verify_request(self, request: Request) -> dict[str, Any]:
         """按代价从低到高逐级拒绝，限流排在一切昂贵操作之前。
@@ -195,7 +204,7 @@ class WorkerAuthVerifier:
         if not await self.check_rate_limit(worker_id, source):
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="请求频率过高")
         body = await self._request_body(request)
-        verified = await self.verify_signature_async(
+        reason = await self.verify_signature_async(
             worker_id,
             method=request.method,
             path=request.url.path,
@@ -205,8 +214,9 @@ class WorkerAuthVerifier:
             signature=signature,
             version=version,
         )
-        if not verified:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="签名验证失败")
+        if reason is not WorkerAuthReason.OK:
+            logger.warning("Worker HMAC 认证拒绝: worker_id={} reason={}", worker_id, reason.value)
+            raise WorkerAuthRejected(reason)
         return {"worker_id": worker_id, "verified": True, "signature_verified": True}
 
     @staticmethod
@@ -277,6 +287,7 @@ async def verify_worker_request_with_signature(request: Request) -> dict[str, An
 
 
 __all__ = [
+    "WorkerAuthRejected",
     "WorkerAuthVerifier",
     "claim_worker_nonce",
     "load_worker_secret",

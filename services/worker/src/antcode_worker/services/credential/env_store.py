@@ -102,6 +102,9 @@ class EnvCredentialStore(CredentialStore):
                 return False
         return True
 
+    def describe_location(self) -> str:
+        return f"{ENV_PREFIX}* 环境变量"
+
     def load(self) -> dict[str, Any] | None:
         """
         从环境变量加载凭证（同步版本）

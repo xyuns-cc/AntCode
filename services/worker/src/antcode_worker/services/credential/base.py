@@ -134,6 +134,16 @@ class CredentialStore(ABC):
         """
         pass
 
+    @abstractmethod
+    def describe_location(self) -> str:
+        """人类可读的凭证存放位置，用于"请清除这里再重新注册"这类运维指令。
+
+        控制面库重建后本地凭据永久失效，报错必须指名要清哪一处；后端不同
+        （文件 / 环境变量）该清的东西完全不同，所以由各实现自报，不在调用方
+        猜路径。
+        """
+        pass
+
 
 # 全局凭证存储实例
 _credential_store: CredentialStore | None = None

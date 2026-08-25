@@ -238,3 +238,23 @@ def test_saved_worker_config_is_private_and_excludes_install_key(tmp_path: Path)
     content = config_path.read_text(encoding="utf-8")
     assert "redis://user:password@redis.example.com/0" in content
     assert "ANTCODE_WORKER_KEY" not in content
+
+
+def test_describe_location_points_at_the_real_credential_file(monkeypatch, tmp_path: Path) -> None:
+    """报错里的"请清除 <路径>"必须指向真实存在的那一份，且带上环境变量兜底。
+
+    单测里给 store 打桩很容易让"路径正确"这件事在假对象上通过；这里绑真实
+    ``PersistentCredentialStore``，一正一反：文件路径确实是被写入的那个，
+    环境变量来源也被提到（只删文件而 WORKER_CREDENTIAL_* 还在，重启会把同一份
+    失效身份读回来）。
+    """
+    _clear_credential_env(monkeypatch)
+    store = PersistentCredentialStore(tmp_path)
+    assert CredentialService(store).save(_credentials("file-worker"))
+    written = tmp_path / "secrets" / "worker_credentials.json"
+    assert written.exists()
+
+    location = store.describe_location()
+
+    assert str(written) in location
+    assert "WORKER_CREDENTIAL_" in location

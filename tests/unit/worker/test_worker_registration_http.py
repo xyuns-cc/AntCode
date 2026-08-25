@@ -197,3 +197,27 @@ def test_install_key_registration_does_not_send_when_store_is_not_durable(monkey
 
     with pytest.raises(OSError, match="read-only filesystem"):
         wiring._register_by_install_key(SimpleNamespace(worker_key="install-key"), credential_service)
+
+
+def test_structurally_valid_credentials_never_trigger_reregistration(monkeypatch) -> None:
+    """撤销护栏（非证伪项：修复前后行为一致，此处冻结它不被后续"自动恢复"改掉）。
+
+    管理员删除/停用一台 Worker 靠的就是把身份从控制面库里去掉。只要本地还留着一份
+    结构合法的凭据，启动路径就不得拿安装 Key 自己回来——否则那条运维手段直接作废。
+    """
+
+    def reject_registration(*_args, **_kwargs):
+        raise AssertionError("本地凭据结构合法时不得走安装 Key 重新注册")
+
+    monkeypatch.setattr(wiring, "_register_by_install_key", reject_registration)
+    credentials = _credentials()
+
+    assert (
+        wiring._require_control_credentials(
+            _config("direct"),
+            SimpleNamespace(),
+            credentials,
+            required=True,
+        )
+        is credentials
+    )

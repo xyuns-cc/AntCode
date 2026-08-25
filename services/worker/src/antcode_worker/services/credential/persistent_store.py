@@ -106,6 +106,11 @@ class PersistentCredentialStore(CredentialStore):
     def exists(self) -> bool:
         return os.path.lexists(self._path) or self._env_store.exists()
 
+    def describe_location(self) -> str:
+        # 环境变量兜底也一并报出：只删文件而 WORKER_CREDENTIAL_* 还在，重启会
+        # 把同一份失效身份再读回来，运维会误判"清了也没用"。
+        return f"{self._path}（若已配置 {self._env_store.describe_location()}，同样需要清除）"
+
     def _prepare_storage_directory(self) -> None:
         self._data_root.mkdir(parents=True, exist_ok=True)
         self._secrets_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
