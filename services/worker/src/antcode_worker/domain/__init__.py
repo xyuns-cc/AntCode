@@ -17,7 +17,6 @@ from antcode_worker.domain.errors import (
     WorkerError,
 )
 from antcode_worker.domain.events import (
-    CircuitBreakerStateChanged,
     # 领域事件
     ConnectionStateChanged,
     DomainEvent,
@@ -72,5 +71,4 @@ __all__ = [
     "TaskReceived",
     "TaskStatusChanged",
     "TaskCancelled",
-    "CircuitBreakerStateChanged",
 ]

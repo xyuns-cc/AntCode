@@ -430,23 +430,6 @@ class ReconnectionFailed(DomainEvent):
     next_delay_seconds: float = 0.0
 
 
-@dataclass
-class CircuitBreakerStateChanged(DomainEvent):
-    """
-    断路器状态变更事件
-
-    当断路器状态发生变化时发布此事件。
-
-    Requirements: 18.5
-    """
-
-    circuit_name: str = ""
-    old_state: str = ""  # CircuitState 的值
-    new_state: str = ""  # CircuitState 的值
-    failure_count: int = 0
-    reason: str | None = None
-
-
 # ============================================================================
 # EventBus (统一事件总线)
 # ============================================================================

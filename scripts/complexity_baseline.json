@@ -1739,7 +1739,7 @@
       "path": "services/worker/src/antcode_worker/domain/events.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 531
+      "value": 514
     },
     {
       "path": "services/worker/src/antcode_worker/domain/events.py",
@@ -2124,12 +2124,6 @@
       "function": "_validate_gateway_port",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "services/worker/src/antcode_worker/services/resilience.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 395
     },
     {
       "path": "services/worker/src/antcode_worker/transport/base.py",
@@ -3924,12 +3918,6 @@
       "function": "test_reclaimer_uses_configured_consumer_group_for_recovery_and_queries",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "tests/unit/worker/test_resilience.py",
-      "function": "TestExponentialBackoff.test_get_delay_for_attempt",
-      "rule": "PLR2004",
-      "value": 3
     },
     {
       "path": "tests/unit/worker/test_runtime.py",
