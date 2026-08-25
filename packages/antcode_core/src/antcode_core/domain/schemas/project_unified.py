@@ -45,7 +45,7 @@ class UnifiedProjectUpdateRequest(BaseModel):
     url_pattern: str | None = Field(None, max_length=500, description="URL匹配模式")
     callback_type: CallbackType | None = Field(None, description="回调类型")
     request_method: RequestMethod | None = Field(None, description="请求方法")
-    extraction_rules: str | list[dict[str, Any]] | None = Field(None, description="提取规则数组(JSON字符串或对象)")
+    extraction_rules: list[ExtractionRule] | None = Field(None, description="提取规则数组(JSON字符串或对象)")
     data_schema: str | dict[str, Any] | None = Field(None, description="数据结构定义(JSON字符串或对象)")
     pagination_config: str | dict[str, Any] | None = Field(None, description="分页配置(JSON字符串或对象)")
     max_pages: int | None = Field(None, ge=1, le=1000, description="最大页数")
@@ -78,13 +78,18 @@ class UnifiedProjectUpdateRequest(BaseModel):
     @field_validator("extraction_rules", mode="before")
     @classmethod
     def parse_extraction_rules(cls, v):
+        """与创建链路同一形状：只还原字符串，逐条 ExtractionRule 交给字段类型去校验。
+
+        原来在这里 for 循环 ``ExtractionRule.model_validate`` 有两处代价：一是逐条的
+        loc 丢掉数组下标，10 条规则里第 2 条错会报成 ``extraction_rules.type``——一个
+        payload 里根本不存在的路径；二是非可迭代入参（如 ``extraction_rules=123``）
+        直接 TypeError，pydantic 只接管 ValueError，于是 422 变 500。
+        """
         if v is None:
             return None
         if isinstance(v, str):
-            if v.strip() == "":
-                return []
-            v = JSONParser.parse_list(v, "extraction_rules")
-        return [ExtractionRule.model_validate(rule).model_dump() for rule in v]
+            return [] if v.strip() == "" else JSONParser.parse_list(v, "extraction_rules")
+        return v
 
     @field_validator("pagination_config", mode="before")
     @classmethod
@@ -238,7 +243,12 @@ class UnifiedProjectUpdateRequest(BaseModel):
             "resume_enabled",
             "dedup_config",
         ]
-        return {k: v for k, v in self.model_dump(exclude_unset=True).items() if k in rule_fields}
+        fields = {k: v for k, v in self.model_dump(exclude_unset=True).items() if k in rule_fields}
+        if self.extraction_rules is not None and "extraction_rules" in fields:
+            # exclude_unset 会递归传进嵌套模型，客户端没显式写 page_type 时整个键会消失，
+            # 存进库的形状就和创建链路（project_service 的 rule.dict()）对不上了。
+            fields["extraction_rules"] = [rule.model_dump() for rule in self.extraction_rules]
+        return fields
 
     def get_file_fields(self):
         """获取文件项目字段"""

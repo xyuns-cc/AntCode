@@ -247,18 +247,18 @@ class ProjectRuleCreateRequest(ProjectCreateRequest):
     @field_validator("extraction_rules", mode="before")
     @classmethod
     def parse_extraction_rules(cls, v):
-        """解析提取规则JSON字符串 - 支持单引号和双引号"""
+        """只把 JSON 字符串还原成 list，逐条 ExtractionRule 交给字段类型去校验。
+
+        这里曾经自己 new ExtractionRule 并 ``except Exception`` 转成
+        ``ValueError(str(e))``，把嵌套 ValidationError 压成一串文本：loc 只能到
+        ``body.extraction_rules``，用户知道"规则有问题"却不知道是第几条的哪个字段。
+        交回给字段类型后 loc 自然是 ``body.extraction_rules.N.<字段>``——传 list 时
+        本来就是这个形状，传 JSON 字符串时不该退化成另一种。
+        """
         if v is None:
             return None
         if isinstance(v, str):
-            parsed = JSONParser.parse_extraction_rules(v, "extraction_rules")
-            if parsed is None:
-                raise ValueError("extraction_rules JSON格式错误")
-
-            try:
-                return [ExtractionRule(**rule) if isinstance(rule, dict) else rule for rule in parsed]
-            except Exception as e:
-                raise ValueError(f"extraction_rules 对象转换错误: {str(e)}")
+            return JSONParser.parse_extraction_rules(v, "extraction_rules")
         return v
 
     @field_validator("pagination_config", mode="before")

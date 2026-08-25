@@ -97,9 +97,10 @@ def test_rule_project_reports_bad_extraction_rule_field_as_422(client: TestClien
     )
 
     assert response.status_code == HTTP_UNPROCESSABLE_CONTENT
-    assert _error_fields(response) == ["body.extraction_rules"]
-    # 笼统的 4xx 不算修好：响应必须指到出错的规则字段名上
-    assert "desc" in response.json()["data"]["errors"][0]["message"]
+    # 定位必须落到「第几条的哪个字段」。只到 body.extraction_rules 不算修好：
+    # 用户知道规则有问题，却不知道是哪一条——错误原因走 loc 这个结构化通道，
+    # 不拿人类可读文案当契约。
+    assert _error_fields(response) == ["body.extraction_rules.0.desc"]
 
 
 def test_rule_project_reports_bad_request_method_as_422(client: TestClient) -> None:
