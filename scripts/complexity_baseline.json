@@ -1664,12 +1664,6 @@
       "value": 9
     },
     {
-      "path": "services/worker/src/antcode_worker/logging/streamer.py",
-      "function": "BufferedLogStreamer.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "services/worker/src/antcode_worker/logs/batch.py",
       "function": "-",
       "rule": "FILE_LINES",

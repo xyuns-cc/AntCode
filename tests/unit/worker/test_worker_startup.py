@@ -89,16 +89,11 @@ class TestModuleImports:
         assert RunStatus.SUCCESS.value == "success"
         assert RunStatus.FAILED.value == "failed"
 
-    def test_logging_module(self):
-        from antcode_worker.logging import (
-            BufferedLogStreamer,
-            LogStreamer,
-            MessageSender,
-        )
+    def test_logs_module(self):
+        from antcode_worker.logs import LogManager, LogStreamer
 
         assert LogStreamer is not None
-        assert BufferedLogStreamer is not None
-        assert MessageSender is not None
+        assert LogManager is not None
 
     def test_heartbeat_module(self):
         from antcode_worker.heartbeat import CapabilityDetector

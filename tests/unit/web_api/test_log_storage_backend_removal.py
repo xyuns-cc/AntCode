@@ -56,7 +56,7 @@ def test_removed_worker_archive_modules_do_not_exist():
         "services/worker/src/antcode_worker/logs/wal.py",
         "services/worker/src/antcode_worker/logs/spool.py",
         "services/worker/src/antcode_worker/logs/archive.py",
-        "services/worker/src/antcode_worker/logging/archiver.py",
+        "services/worker/src/antcode_worker/logging",
     ]
 
     for relative_path in removed:
