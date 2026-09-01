@@ -1205,7 +1205,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1163
+      "value": 1140
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/project.py",
@@ -1355,7 +1355,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 554
+      "value": 513
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers.py",
@@ -1368,18 +1368,6 @@
       "function": "update_worker_task_priority",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers_crud.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 305
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/workers_crud.py",
-      "function": "register_crud_routes",
-      "rule": "C901",
-      "value": 11
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/workers_dispatch.py",
@@ -3486,12 +3474,6 @@
       "function": "test_registration_ack_rejects_path_identity_mismatch",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "tests/unit/web_api/test_workers_security.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 324
     },
     {
       "path": "tests/unit/worker/test_artifact_transfer.py",

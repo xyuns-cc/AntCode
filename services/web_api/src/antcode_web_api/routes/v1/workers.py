@@ -18,13 +18,10 @@ from antcode_core.domain.models import (  # noqa: F401  # Task 供测试 monkeyp
 from antcode_core.domain.schemas.worker import (  # noqa: F401
     WorkerCapabilities,
     WorkerCreateRequest,
-    WorkerHeartbeatRequest,
     WorkerListResponse,
     WorkerMetrics,
     WorkerRegisterDirectRequest,
     WorkerRegisterDirectResponse,
-    WorkerRegisterRequest,
-    WorkerRegisterResponse,
     WorkerResponse,
     WorkerTestConnectionResponse,
     WorkerUpdateRequest,
@@ -61,7 +58,7 @@ from antcode_web_api.routes.v1 import workers_permission as _workers_permission
 # 顶层保留 3 个 shim 让 workers_route.get_best_worker(...) 测试引用不变。
 from antcode_web_api.routes.v1 import workers_query as _workers_query
 
-# P2 拆分: register-direct / register(410 shim) / heartbeat 移到 workers_register.py。
+# P2 拆分: register-direct 移到 workers_register.py。
 from antcode_web_api.routes.v1 import workers_register as _workers_register
 
 # P2 拆分: 2 个资源管理 handler (get/update resources) 移到 workers_resources.py。
@@ -88,24 +85,6 @@ from antcode_web_api.routes.v1.workers_install_key import (  # noqa: F401
     _is_registration_acknowledged,
     _is_source_match,
     _record_install_key_failed_attempt,
-)
-
-# P2 拆分: Worker 上报接口的 schema + handler + 常量集中在 workers_report.py, 主
-# workers.py 只保留 re-export 与底部 register_report_routes 注册, 让测试的
-# workers_route.report_task_log 等引用继续可命中 (noqa: F401 防 ruff 误删)。
-from antcode_web_api.routes.v1.workers_report import (  # noqa: F401
-    MAX_LOG_BATCH_ENTRIES,
-    MAX_LOG_LINE_CHARS,
-    WorkerTaskHeartbeatReportRequest,
-    WorkerTaskLogReportRequest,
-    WorkerTaskLogsBatchReportRequest,
-    WorkerTaskStatusReportRequest,
-    _WorkerReportBaseModel,
-    register_report_routes,
-    report_execution_heartbeat,
-    report_task_log,
-    report_task_logs_batch,
-    report_task_status,
 )
 from antcode_web_api.routing import promote_static_routes
 
@@ -332,12 +311,6 @@ async def create_worker(request, http_request, current_user):
     )
 
 
-async def get_worker_credentials(worker_id, current_user):
-    return await _workers_crud.get_worker_credentials(
-        worker_id, current_user, require_worker_access=_require_worker_access
-    )
-
-
 async def disconnect_worker(worker_id, current_user=None):
     _ = current_user
     return await _workers_crud.disconnect_worker(worker_id)
@@ -405,19 +378,9 @@ async def issue_worker_redis_acl(worker_id: str, auth_context: dict):
     return await _workers_install_key.issue_worker_redis_acl(worker_id, auth_context)
 
 
-# P2 拆分: register_worker (410 shim) 移至 workers_register.py
-async def register_worker(request):
-    return await _workers_register.register_worker(request)
-
-
 # P2 拆分: generate_install_key 移至 workers_install_key.py。
 async def generate_install_key(request, http_request, current_user):
     return await _workers_install_key.generate_install_key(request, http_request, current_user)
-
-
-# P2 拆分: worker_heartbeat 移至 workers_register.py
-async def worker_heartbeat(request, auth_info):
-    return await _workers_register.worker_heartbeat(request, auth_info)
 
 
 # P2 拆分: 3 query shim (load_ranking / best_worker / render_capable) 已移至
@@ -481,10 +444,6 @@ async def cancel_worker_queued_task(worker_id, task_id, current_user=None):
 # 通过 register_distributed_routes 挂 @router 装饰(见文件末尾)。
 # workers_route.get_distributed_task_status 等测试引用通过下面 shim 保留。
 
-
-# P2 拆分: 4 个 Worker 上报接口注册委托给 workers_report.register_report_routes,
-# 传入 _verify_worker_credential_headers 依赖, 保持 URL / 契约不变。
-register_report_routes(router, _verify_worker_credential_headers)
 
 # P2 拆分: 3 个查询接口通过 workers_query.register_query_routes 挂路由, 保持
 # URL (/load/ranking, /best, /render-capable) 与 DI 不变。

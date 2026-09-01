@@ -147,40 +147,6 @@ async def test_verify_worker_credential_headers_rejects_wrong_api_key(monkeypatc
     assert "API Key" in str(exc_info.value.detail)
 
 
-def test_worker_report_payload_rejects_legacy_execution_id():
-    with pytest.raises(ValidationError):
-        workers_route.WorkerTaskLogReportRequest(
-            execution_id="legacy-exec-id",
-            log_type="stdout",
-            content="hello",
-        )
-
-
-def test_worker_log_report_models_enforce_resource_limits():
-    with pytest.raises(ValidationError):
-        workers_route.WorkerTaskLogReportRequest(
-            run_id="run-1",
-            log_type="stdout",
-            content="x" * (workers_route.MAX_LOG_LINE_CHARS + 1),
-        )
-    item = workers_route.WorkerTaskLogReportRequest(run_id="run-1", content="line")
-    with pytest.raises(ValidationError):
-        workers_route.WorkerTaskLogsBatchReportRequest(logs=[item] * (workers_route.MAX_LOG_BATCH_ENTRIES + 1))
-
-
-@pytest.mark.asyncio
-async def test_report_task_log_uses_strict_auth_context(monkeypatch):
-    _ = monkeypatch
-    payload = workers_route.WorkerTaskLogReportRequest(
-        run_id="run-1",
-        log_type="stdout",
-        content="hello",
-    )
-    with pytest.raises(HTTPException) as exc_info:
-        await workers_route.report_task_log(payload, auth_context={"worker": object()})
-    assert exc_info.value.status_code == status.HTTP_410_GONE
-
-
 @pytest.mark.asyncio
 async def test_generate_install_key_persists_explicit_allowed_source(monkeypatch):
     class DummyUser:
@@ -253,57 +219,6 @@ async def test_install_key_failure_threshold_only_blocks_attacker_source(monkeyp
     assert (unrelated_blocked, unrelated_ttl) == (False, 0)
     assert not hasattr(workers_route, "_check_install_key_global_block")
     assert all("global" not in key for key in redis.values.keys())
-
-
-@pytest.mark.asyncio
-async def test_report_task_logs_batch_exposes_partial_failure(monkeypatch):
-    _ = monkeypatch
-    payload = workers_route.WorkerTaskLogsBatchReportRequest(
-        logs=[
-            workers_route.WorkerTaskLogReportRequest(
-                run_id="run-1",
-                log_type="stdout",
-                content="ok1",
-            ),
-            workers_route.WorkerTaskLogReportRequest(
-                run_id="run-fail",
-                log_type="stderr",
-                content="bad",
-            ),
-            workers_route.WorkerTaskLogReportRequest(
-                run_id="run-2",
-                log_type="stdout",
-                content="ok2",
-            ),
-        ]
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        await workers_route.report_task_logs_batch(payload, auth_context={"worker": object()})
-    assert exc_info.value.status_code == status.HTTP_410_GONE
-
-
-@pytest.mark.asyncio
-async def test_report_execution_heartbeat_uses_run_id(monkeypatch):
-    _ = monkeypatch
-    payload = workers_route.WorkerTaskHeartbeatReportRequest(run_id="run-heartbeat-1")
-    with pytest.raises(HTTPException) as exc_info:
-        await workers_route.report_execution_heartbeat(payload, auth_context={"worker": object()})
-    assert exc_info.value.status_code == status.HTTP_410_GONE
-
-
-@pytest.mark.asyncio
-async def test_report_task_status_uses_run_id(monkeypatch):
-    _ = monkeypatch
-    payload = workers_route.WorkerTaskStatusReportRequest(
-        run_id="run-status-1",
-        status="success",
-        exit_code=0,
-        error_message="",
-    )
-    with pytest.raises(HTTPException) as exc_info:
-        await workers_route.report_task_status(payload, auth_context={"worker": object()})
-    assert exc_info.value.status_code == status.HTTP_410_GONE
 
 
 @pytest.mark.asyncio

@@ -21,23 +21,3 @@ async def test_distributed_status_rejection_has_no_success_side_effects(monkeypa
     assert service._task_status == {}
     append_log.assert_not_awaited()
     push_status.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_http_status_report_exposes_rejected_business_update(monkeypatch):
-    update = AsyncMock(return_value=False)
-    log_service_module = importlib.import_module("antcode_core.application.services.workers.distributed_log_service")
-    ownership_module = importlib.import_module("antcode_core.application.services.workers.run_ownership_service")
-    monkeypatch.setattr(ownership_module, "require_worker_owns_run", AsyncMock())
-    monkeypatch.setattr(
-        log_service_module.distributed_log_service,
-        "update_task_status",
-        update,
-    )
-    request = workers_route.WorkerTaskStatusReportRequest(run_id="run-1", status="success")
-
-    with pytest.raises(HTTPException) as exc_info:
-        await workers_route.report_task_status(request, auth_context={"worker": object()})
-
-    assert exc_info.value.status_code == status.HTTP_410_GONE
-    update.assert_not_awaited()

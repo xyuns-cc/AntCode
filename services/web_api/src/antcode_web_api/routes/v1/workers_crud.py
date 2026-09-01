@@ -60,14 +60,6 @@ async def create_worker(
     return success(worker_to_response(worker), message="Worker 创建成功")
 
 
-async def get_worker_credentials(worker_id: str, current_user: TokenData, *, require_worker_access):
-    await require_worker_access(worker_id, current_user)
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail="Worker 凭据不可恢复，请使用新的安装 Key 重新注册",
-    )
-
-
 async def disconnect_worker(worker_id: str):
     result = await worker_service.disconnect_worker(worker_id)
     if not result:
@@ -179,19 +171,6 @@ def register_crud_routes(router, *, worker_to_response, require_worker_access, l
     ):
         return await create_worker(request, http_request, current_user, worker_to_response=worker_to_response)
 
-    @router.get(
-        "/{worker_id}/credentials",
-        response_model=BaseResponse[dict],
-        summary="获取 Worker 凭证",
-        description="Worker 凭证不可恢复，仅在注册响应中返回一次",
-        dependencies=[admin_dep],
-    )
-    async def _get_worker_credentials(
-        worker_id: str,
-        current_user: TokenData = Depends(get_current_user),
-    ):
-        return await get_worker_credentials(worker_id, current_user, require_worker_access=require_worker_access)
-
     @router.post(
         "/{worker_id}/disconnect",
         response_model=BaseResponse[dict],
@@ -296,7 +275,6 @@ __all__ = [
     "delete_worker",
     "disconnect_worker",
     "get_worker",
-    "get_worker_credentials",
     "get_workers",
     "refresh_worker_status",
     "register_crud_routes",

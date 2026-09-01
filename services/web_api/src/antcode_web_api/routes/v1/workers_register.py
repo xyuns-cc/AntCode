@@ -1,9 +1,4 @@
-"""Worker 注册相关接口 (Direct 注册 / heartbeat / 已废弃 register)。
-
-P2 拆分自 workers.py:
-- POST /workers/register-direct (register_direct_worker)
-- POST /workers/register (register_worker, 410 shim)
-- POST /workers/heartbeat (worker_heartbeat, HMAC 签名认证)
+"""Worker Direct 注册接口 (POST /workers/register-direct)。
 
 install_key 管理和 V2 注册分别由独立模块负责。
 """
@@ -13,16 +8,12 @@ from __future__ import annotations
 from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings
 from antcode_core.common.exceptions import RedisConnectionError
-from antcode_core.common.security.worker_auth import verify_worker_request_with_signature
 from antcode_core.domain.schemas.worker import (
-    WorkerHeartbeatRequest,
     WorkerRegisterDirectRequest,
     WorkerRegisterDirectResponse,
-    WorkerRegisterRequest,
-    WorkerRegisterResponse,
 )
 from antcode_core.infrastructure.redis import direct_register_proof_key
-from fastapi import Depends, HTTPException, status
+from fastapi import HTTPException, status
 from loguru import logger
 
 from antcode_web_api.response import BaseResponse, success
@@ -90,26 +81,8 @@ async def register_direct_worker(request: WorkerRegisterDirectRequest, *, mask_r
     )
 
 
-async def register_worker(request: WorkerRegisterRequest):
-    """已废弃, 保留 410 shim; 统一走 V2 安装注册或 Direct 证明注册。"""
-    _ = request
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail="该注册方式已下线，请使用 /workers/register-by-key-v2 或 /workers/register-direct",
-    )
-
-
-async def worker_heartbeat(request: WorkerHeartbeatRequest, auth_info: dict):
-    """旧 HMAC 心跳没有 Lease 代际，保留显式 410 升级信号。"""
-    _ = request, auth_info
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail="旧 Worker HTTP 心跳协议已下线，请使用 Direct Lease 或 Gateway mTLS 心跳",
-    )
-
-
 def register_register_routes(router, mask_redis_url) -> None:
-    """3 个独立的注册/心跳路由挂载, install_key 相关仍在主 workers.py。"""
+    """Direct 注册路由挂载, install_key 相关仍在主 workers.py。"""
 
     @router.post(
         "/register-direct",
@@ -120,31 +93,8 @@ def register_register_routes(router, mask_redis_url) -> None:
     async def _register_direct_worker(request: WorkerRegisterDirectRequest):
         return await register_direct_worker(request, mask_redis_url=mask_redis_url)
 
-    @router.post(
-        "/register",
-        response_model=BaseResponse[WorkerRegisterResponse],
-        summary="Worker 注册",
-        description="Worker 主动注册到平台 (已废弃)",
-    )
-    async def _register_worker(request: WorkerRegisterRequest):
-        return await register_worker(request)
-
-    @router.post(
-        "/heartbeat",
-        response_model=BaseResponse[dict],
-        summary="旧 Worker 心跳（已下线）",
-        description="保留 410 升级信号；当前 Worker 必须使用带 Lease 代际的传输",
-    )
-    async def _worker_heartbeat(
-        request: WorkerHeartbeatRequest,
-        auth_info: dict = Depends(verify_worker_request_with_signature),
-    ):
-        return await worker_heartbeat(request, auth_info)
-
 
 __all__ = [
     "register_direct_worker",
     "register_register_routes",
-    "register_worker",
-    "worker_heartbeat",
 ]

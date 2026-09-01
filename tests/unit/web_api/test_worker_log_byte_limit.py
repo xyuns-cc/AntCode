@@ -7,25 +7,8 @@ from antcode_core.common.log_limits import (
     MAX_SSE_LOG_MESSAGE_BYTES,
     LogBatchLimits,
 )
-from antcode_web_api.routes.v1.workers_report import WorkerTaskLogReportRequest
 from antcode_web_api.streams.sse import build_log_line_message, format_sse_event
 from pydantic import ValidationError
-
-
-def test_worker_http_log_accepts_shared_utf8_byte_limit():
-    request = WorkerTaskLogReportRequest(
-        run_id="run-1",
-        content="a" * DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES,
-    )
-
-    assert len(request.content.encode("utf-8")) == DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES
-
-
-def test_worker_http_log_rejects_multibyte_content_over_shared_limit():
-    content = "中" * (DEFAULT_LOG_MAX_ENTRY_CONTENT_BYTES // 3 + 1)
-
-    with pytest.raises(ValidationError, match="UTF-8 字节数超限"):
-        WorkerTaskLogReportRequest(run_id="run-1", content=content)
 
 
 def test_direct_log_batch_enforces_four_byte_unicode_boundary():

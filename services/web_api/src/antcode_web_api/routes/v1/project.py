@@ -449,29 +449,6 @@ def _validate_repository_project(
 
 
 @project_router.post(
-    "/import",
-    response_model=BaseResponse[list[ProjectResponse]],
-    summary="导入文件项目",
-)
-async def import_projects(
-    current_user_id=Depends(get_current_user_id),
-):
-    """[已下线] 上传文件建文件项目。
-
-    O6/迁移 44 后新架构下文件项目源码统一走 Git 仓库；请改用：
-    ``POST /api/v1/repositories/import-from-repository``（同时支持 code/file
-    项目）。此端点保留仅为让前端收到明确错误信息，而非静默 500。
-    """
-    raise HTTPException(
-        status_code=status.HTTP_410_GONE,
-        detail=(
-            "上传式文件项目导入已下线。请先在 /api/v1/repositories 创建 Git 仓库"
-            "，然后调用 POST /api/v1/repositories/import-from-repository 导入项目。"
-        ),
-    )
-
-
-@project_router.post(
     "/{project_id}/export",
     summary="导出项目配置",
     response_model=None,

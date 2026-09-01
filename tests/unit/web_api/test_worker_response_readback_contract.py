@@ -21,7 +21,7 @@ from antcode_core.application.services.workers.worker_heartbeat_persistence impo
     build_redis_heartbeat_update,
     build_worker_heartbeat_update,
 )
-from antcode_core.domain.schemas.worker import WorkerCapabilities, WorkerHeartbeatRequest, WorkerMetrics
+from antcode_core.domain.schemas.worker import WorkerCapabilities, WorkerMetrics
 from antcode_web_api.routes.v1.workers import _worker_to_response
 from antcode_worker.app.capabilities import detect_plugin_capabilities
 from antcode_worker.heartbeat.reporter_models import Heartbeat, Metrics, OSInfo, SpiderStats
@@ -92,25 +92,18 @@ def test_persisted_metrics_keys_are_all_declared_by_readback_schema() -> None:
     assert set(persisted) <= set(WorkerMetrics.model_fields)
 
 
-def test_http_heartbeat_persisted_metrics_keys_are_all_declared_by_readback_schema() -> None:
+def test_persisted_heartbeat_metrics_keys_are_all_declared_by_readback_schema() -> None:
     """另一条落库路径同样要钉。
 
     ``build_worker_heartbeat_update`` 与 ``_redis_metrics`` 是同一个形状：先过
     ``extra="forbid"`` 的模型，再往 dict 里补塞 ``spider_stats``。补塞的键绕开了模型，
-    上一条契约测试只覆盖了 Redis 那条投影；下次只在 HTTP 这条加字段照样漏到真机。
+    上一条契约测试只覆盖了 Redis 那条投影；下次只在这条加字段照样漏到真机。
     """
-    request = WorkerHeartbeatRequest(
-        worker_id="mn-worker-02",
-        api_key="k",
-        metrics=WorkerMetrics(maxConcurrentTasks=REPORTED_MAX_CONCURRENT),
-        spider_stats={"request_count": REPORTED_REQUEST_COUNT},
-    )
-
     update = build_worker_heartbeat_update(
         heartbeat_at=datetime.now(),
         status="online",
-        metrics=request.metrics.model_dump(),
-        spider_stats=request.spider_stats,
+        metrics=WorkerMetrics(maxConcurrentTasks=REPORTED_MAX_CONCURRENT).model_dump(),
+        spider_stats={"request_count": REPORTED_REQUEST_COUNT},
         system_info={},
         capabilities=None,
     )

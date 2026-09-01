@@ -187,24 +187,6 @@ class SpiderStatsSummary(BaseModel):
         )
 
 
-class WorkerHeartbeatRequest(BaseModel):
-    """Worker 心跳请求"""
-
-    worker_id: str = Field(..., description="Worker ID")
-    api_key: str = Field(..., description="API密钥")
-    status: str = Field("online", description="Worker 状态")
-    metrics: WorkerMetrics = Field(default_factory=WorkerMetrics)
-    version: str = Field("", description="版本")
-
-    os_type: str = Field("", description="操作系统类型")
-    os_version: str = Field("", description="操作系统版本")
-    python_version: str = Field("", description="Python 版本")
-    machine_arch: str = Field("", description="CPU 架构")
-
-    capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)
-    spider_stats: dict = Field(default_factory=dict, description="爬虫统计摘要")
-
-
 class WorkerTestConnectionResponse(BaseModel):
     """测试连接响应"""
 
@@ -212,25 +194,6 @@ class WorkerTestConnectionResponse(BaseModel):
     latency: int = Field(0, description="延迟（毫秒）")
     error: str = Field("", description="错误信息")
     connection_type: str = Field("", description="连接类型（heartbeat/gateway/direct）")
-
-
-class WorkerRegisterRequest(BaseModel):
-    """Worker 注册请求（Worker 主动注册）"""
-
-    name: str = Field(..., min_length=1, max_length=100, description="Worker 名称")
-    host: str = Field(..., min_length=1, max_length=255, description="主机地址")
-    port: int = Field(8001, ge=1, le=65535, description="节点端口")
-    region: str = Field("", max_length=50, description="区域")
-    version: str = Field("", description="版本")
-    metrics: WorkerMetrics = Field(default_factory=WorkerMetrics, description="初始指标")
-
-
-class WorkerRegisterResponse(BaseModel):
-    """Worker 注册响应"""
-
-    worker_id: str = Field(..., description="Worker 公开ID")
-    api_key: str = Field(..., description="API密钥")
-    secret_key: str = Field(..., description="密钥")
 
 
 class WorkerRegisterDirectRequest(BaseModel):
@@ -281,10 +244,7 @@ __all__ = [
     "WorkerListResponse",
     "WorkerAggregateStats",
     "SpiderStatsSummary",
-    "WorkerHeartbeatRequest",
     "WorkerTestConnectionResponse",
-    "WorkerRegisterRequest",
-    "WorkerRegisterResponse",
     "WorkerRegisterDirectRequest",
     "WorkerRegisterDirectResponse",
     "WorkerInstallKeyRequest",
