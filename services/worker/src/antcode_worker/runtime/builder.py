@@ -1,10 +1,4 @@
-"""
-运行时构建器
-
-实现 uv venv / uv sync 构建，确保 reproducible behavior。
-
-Requirements: 6.4
-"""
+"""运行时构建器：``uv venv`` 建虚拟环境，``uv pip install -r`` 装依赖。"""
 
 import asyncio
 import contextlib

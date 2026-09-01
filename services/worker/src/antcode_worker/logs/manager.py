@@ -106,10 +106,9 @@ class LogManager:
         logger.info(f"[{self.run_id}] 日志管理器已停止")
 
     async def _init_components(self) -> None:
-        # P2 改造：默认只走 batch（吞吐高 + 失败重试更优）。
-        # ``enable_realtime`` 仍保留构造 RealtimeSender 用于调试 / 单元测试,
-        # 但不会再被 ``_dispatch_entry`` 调用——避免 realtime+batch 同条日志
-        # 双发,以及 realtime 速率限制把整条 worker 拖死。
+        # 默认走 batch（吞吐高 + 失败重试更优）。两个 sender 都在时 ``_dispatch_entry``
+        # 只用 batch，RealtimeSender 仅在 batch 未启用时作为 fallback——否则同条日志
+        # 双发，且 realtime 的速率限制会把整条 worker 拖死。
         if self._config.enable_realtime and self._transport:
             self._realtime = RealtimeSender(
                 self.run_id,

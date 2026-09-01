@@ -1142,7 +1142,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             raise_if_generation_lost(exc)
             logger.warning("release_run_ownership 失败: run_id={}, err={}", run_id, exc)
 
-    # 结算重试参数：指数退避 1s→16s，共 5 次尝试（总窗口 ~31s）。
+    # 结算重试参数：共 5 次尝试，失败后退避 1s/2s/4s/8s（最后一次不再等），重试窗口合计 15s。
     _SETTLE_MAX_ATTEMPTS = 5
     _SETTLE_BACKOFF_BASE_SECONDS = 1.0
 

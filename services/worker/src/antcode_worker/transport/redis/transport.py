@@ -3,16 +3,12 @@ Redis 传输层实现（Direct 模式）
 
 内网 Worker 直连 Redis Streams，低延迟。
 
-P1b 改造：
-- ``report_result`` 写入 ``task:result`` Stream 时使用 Proto bytes
-  （``data_pb2.TaskStatus`` 序列化到 ``PROTO_FIELD``），
-  与 Master ``result_loop`` 的 ``ProtoCodec`` 对齐。
-- ``send_log`` / ``send_log_batch`` 写入 log Stream 时使用 Proto bytes
-  （``data_pb2.LogBatch``），与 Master ``log_ingest_loop`` 对齐。
-- ``send_log_chunk`` / ``send_heartbeat`` / ``poll_control`` /
-  ``send_control_result`` 暂时保留原有 dict/JSON wire format
-
-Requirements: 5.3, 7.2, 11.3
+wire format：
+- ``report_result`` 写 ``task:result`` Stream 用 Proto bytes（``data_pb2.TaskStatus``
+  序列化到 ``PROTO_FIELD``），与 Master ``result_loop`` 的 ``ProtoCodec`` 对齐。
+- ``send_log`` / ``send_log_batch`` 写 log Stream 用 Proto bytes（``data_pb2.LogBatch``），
+  与 Master ``log_ingest_loop`` 对齐。
+- ``poll_control`` / ``send_control_result`` 仍是 dict/JSON。
 """
 
 import asyncio

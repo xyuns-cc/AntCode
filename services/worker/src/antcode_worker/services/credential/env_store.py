@@ -95,14 +95,7 @@ class EnvCredentialStore(CredentialStore):
         return f"{ENV_PREFIX}* 环境变量"
 
     def load(self) -> dict[str, Any] | None:
-        """
-        从环境变量加载凭证（同步版本）
-
-        Returns:
-            凭证字典，如果必填字段缺失则返回 None
-
-        Requirements: 6.4
-        """
+        """从环境变量加载凭证；必填字段缺失返回 None。"""
         credentials: dict[str, Any] = {}
         for field, env_name in self._env_mapping.items():
             value = os.getenv(env_name)
@@ -115,73 +108,25 @@ class EnvCredentialStore(CredentialStore):
         return credentials
 
     async def load_async(self) -> dict[str, Any] | None:
-        """
-        从环境变量加载凭证（异步版本）
-
-        环境变量读取是同步操作，此方法直接调用同步版本。
-
-        Returns:
-            凭证字典，如果必填字段缺失则返回 None
-
-        Requirements: 6.4
-        """
         return self.load()
 
     def save(self, credentials: dict[str, Any]) -> bool:
-        """
-        保存凭证到环境变量（同步版本）
+        """恒抛：环境变量是只读来源，写进程内 env 不落盘，等于把新签发的凭证丢掉。
 
-        注意：环境变量修改仅在当前进程有效，不会持久化。
-
-        Args:
-            credentials: 凭证字典
-
-        Returns:
-            是否保存成功
-
-        Requirements: 6.5
+        返回类型上的 ``bool`` 只为满足 ``CredentialStore`` 接口，永远不会有返回值。
         """
         del credentials
         raise RuntimeError("环境变量凭证存储是只读来源")
 
     async def save_async(self, credentials: dict[str, Any]) -> bool:
-        """
-        保存凭证到环境变量（异步版本）
-
-        环境变量设置是同步操作，此方法直接调用同步版本。
-
-        Args:
-            credentials: 凭证字典
-
-        Returns:
-            是否保存成功
-
-        Requirements: 6.5
-        """
+        """同样恒抛，见 ``save``。"""
         return self.save(credentials)
 
     def clear(self) -> bool:
-        """
-        清除凭证环境变量（同步版本）
-
-        Returns:
-            是否清除成功
-
-        Requirements: 6.6
-        """
+        """只从当前进程的 environ 里移除，不影响父进程或下次启动的注入值。"""
         for env_name in self._env_mapping.values():
             os.environ.pop(env_name, None)
         return True
 
     async def clear_async(self) -> bool:
-        """
-        清除凭证环境变量（异步版本）
-
-        环境变量删除是同步操作，此方法直接调用同步版本。
-
-        Returns:
-            是否清除成功
-
-        Requirements: 6.6
-        """
         return self.clear()

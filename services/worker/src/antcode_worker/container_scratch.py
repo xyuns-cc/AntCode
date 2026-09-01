@@ -5,9 +5,10 @@ Docker 的 ``tmpfs:`` 声明不带 ``size=`` 时，内核按**宿主内存的一
 Worker 容器里，``/tmp`` 与 ``/home/appuser/.cache`` 各报 16047MB，是容器全部额度的
 4~5 倍。
 
-这与沙箱层 ``--tmpfs`` 不带 ``--size``（见 ``executor/sandbox_mounts.py``）、JVM 读不到
-cgroup 按宿主内存定堆尺寸（见 ``runtime/runtime_budget.py``）、自适应限额读宿主 /proc
-（见 ``resource_budget.py``）是同一族缺陷：**值从错误的坐标系算出来**。
+这与沙箱层拿不到 ``--size`` 的那两个 tmpfs（``/`` 与 ``/dev``，见
+``executor/sandbox_scratch.py``）、JVM 读不到 cgroup 按宿主内存定堆尺寸（见
+``runtime/runtime_budget.py``）、自适应限额读宿主 /proc（见 ``resource_budget.py``）
+是同一族缺陷：**值从错误的坐标系算出来**。
 
 为什么校验要落在 Worker 里，而不是只改 compose：尺寸是容器创建期属性，进程无法自己
 改；而 compose 文件不止仓库里这几份（真机长期跑的 ``docker-compose.mn.yml`` 就不在

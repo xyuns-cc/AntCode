@@ -72,7 +72,7 @@ class LeaseRenewalWindow:
 
     ``ttl_ms`` 的默认值只服务于"租约尚未签发"的引导阶段。租约签发后
     ``HeartbeatReporter`` 一律用服务端下发的 ``LeaseResponse.ttl_ms``
-    重建本对象（见 ``apply_server_lease_window``）——否则服务端把 TTL 收到
+    重建本对象（见 ``adopt_server_window``）——否则服务端把 TTL 收到
     8s 时，本地按 30s 校验 ``5000*2 < 30000`` 会通过，而实际
     ``10000 >= 8000`` 已经违反不变量，租约会在两次续期之间过期。
     """

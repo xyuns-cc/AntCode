@@ -1,11 +1,4 @@
-"""
-Worker 域模型定义
-
-定义 Worker 执行侧所需的最小模型集合。
-注意：这些模型不等同于 antcode_core 的 PostgreSQL 模型。
-
-Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
-"""
+"""Worker 执行侧的最小模型集合——与 antcode_core 的 PostgreSQL 模型不是一回事。"""
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -35,149 +28,101 @@ class SourceBundle:
 
 @dataclass
 class RunContext:
-    """
-    执行上下文
+    """一次执行所需的全部上下文。"""
 
-    包含一次执行所需的所有上下文信息。
+    run_id: str  # 全局唯一
+    task_id: str
+    project_id: str
 
-    Requirements: 3.1
-    """
-
-    run_id: str  # 执行实例 ID（全局唯一）
-    task_id: str  # 任务 ID
-    project_id: str  # 项目 ID
-
-    # 运行时规格
     runtime_spec: Optional["RuntimeSpec"] = None
 
-    # 资源限制
-    timeout_seconds: int = 3600  # 执行超时（秒）
-    memory_limit_mb: int = 0  # 内存限制（MB，0=不限制）
-    cpu_limit_seconds: int = 0  # CPU 时间限制（秒，0=不限制）
+    timeout_seconds: int = 3600
+    memory_limit_mb: int = 0  # 0=不限制
+    cpu_limit_seconds: int = 0  # 秒，0=不限制
 
-    # 元数据
-    priority: int = 0  # 优先级（越大越高）
+    priority: int = 0  # 越大越高
     labels: dict[str, str] = field(default_factory=dict)
     created_at: datetime | None = field(default_factory=datetime.now)
 
-    # 传输层信息
-    receipt: str | None = None  # 任务回执（用于 ack/requeue）
+    receipt: str | None = None  # 任务回执，用于 ack/requeue
 
 
 @dataclass
 class RuntimeSpec:
-    """
-    运行时规格
+    """执行环境规格；确定性字段用于算 runtime_hash。"""
 
-    定义执行环境的确定性字段，用于计算 runtime_hash。
+    python_version: str | None = None  # 如 "3.11"
+    python_path: str | None = None
 
-    Requirements: 6.2
-    """
-
-    # Python 规格
-    python_version: str | None = None  # Python 版本（如 "3.11"）
-    python_path: str | None = None  # 指定 Python 路径
-
-    # 依赖锁定
     lock_source: str | None = None  # uv.lock 内容哈希或 URI
     requirements: list[str] = field(default_factory=list)  # requirements.txt 内容
 
-    # 可选约束
     constraints: list[str] = field(default_factory=list)
     extras: list[str] = field(default_factory=list)
 
-    # 非确定性字段（不影响 runtime_hash）
+    # 非确定性，不影响 runtime_hash
     env_vars: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
 class TaskPayload:
-    """
-    任务数据
-
-    包含任务的输入数据和参数。
-
-    Requirements: 3.2
-    """
+    """任务的输入数据与参数。"""
 
     task_type: TaskType = TaskType.CODE
 
-    # Worker 执行工作区，由 source bundle 解包生成
+    # 执行工作区，由 source bundle 解包生成
     workspace_path: str = ""
     project_cwd: str = ""
     source_bundle: SourceBundle | None = None
 
-    # 运行上下文（供插件/子进程读取）
     run_id: str = ""
     project_id: str = ""
 
-    # 执行入口
-    entry_point: str = ""  # 入口文件
-    function: str | None = None  # 入口函数
+    entry_point: str = ""
+    function: str | None = None
 
-    # 参数
     args: list[str] = field(default_factory=list)
     kwargs: dict[str, Any] = field(default_factory=dict)
 
-    # 环境变量（运行时注入）
     env_vars: dict[str, str] = field(default_factory=dict)
 
-    # 输入数据 / 产物配置
     inputs: dict[str, Any] = field(default_factory=dict)
-    artifact_patterns: list[str] = field(default_factory=list)  # 产物匹配模式
+    artifact_patterns: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ExecPlan:
-    """
-    执行计划
+    """由 Plugin 生成、描述如何执行任务；Plugin 只产出计划，不直接执行。"""
 
-    由 Plugin 生成，描述如何执行任务。
-    Plugin 只产出 ExecPlan，不直接执行。
+    command: str  # 可执行文件的绝对路径
 
-    Requirements: 3.3
-    """
-
-    # 命令（必填字段放在前面）
-    command: str  # 可执行文件路径
-
-    # 运行 ID（可选）
     run_id: str | None = None
 
-    # 命令参数
     args: list[str] = field(default_factory=list)
 
-    # 环境
     env: dict[str, str] = field(default_factory=dict)
-    cwd: str | None = None  # 工作目录
+    cwd: str | None = None
     # source bundle 解包根目录（cwd 的上级）。沙箱按它暴露 include_paths 共享目录。
     workspace_root: str | None = None
 
-    # 超时
     timeout_seconds: int = 3600
     grace_period_seconds: int = 10  # SIGTERM 后等待时间
 
-    # 资源限制
     memory_limit_mb: int = 0
     cpu_limit_seconds: int = 0
-    # 沙箱硬限制（0 = 使用 ExecutorConfig 默认；POSIX rlimit）
+    # 以下 POSIX rlimit 项，0 = 回落到 ExecutorConfig 的对应默认值
     max_open_files: int = 0
     max_processes: int = 0
-    # T7-P2-4: RLIMIT_FSIZE 上限（MB），保护 worker 磁盘被失控子进程写满
-    # 0 = 使用 ExecutorConfig.default_max_file_size_mb（默认 1GB 单文件）
     max_file_size_mb: int = 0
     enforce_rlimit: bool = True
 
-    # 产物策略
     artifact_patterns: list[str] = field(default_factory=list)
     collect_stdout: bool = True
     collect_stderr: bool = True
 
-    # 沙箱配置
     sandbox_enabled: bool = False
     sandbox_config: dict[str, Any] = field(default_factory=dict)
 
-    # 元数据
     plugin_name: str | None = None  # 生成此计划的插件名
 
 
