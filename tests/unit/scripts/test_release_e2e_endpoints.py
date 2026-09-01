@@ -82,18 +82,13 @@ def test_default_ports_keep_the_portless_origins_the_runner_already_used(monkeyp
     assert f"ANTCODE_E2E_WEB_API_URL={endpoints.https_origin}\n" in runner_env.read_text(encoding="utf-8")
 
 
-def test_remapped_ports_move_every_endpoint_off_the_default_ones(monkeypatch, tmp_path: Path) -> None:
-    """必须失败臂的前提：端口重映射后，判据的目标必须整体跟着搬走。"""
-    state, _ = run_prepare(monkeypatch, tmp_path, ports=REMAPPED)
-
-    endpoints = release_endpoints(environment_file(state))
-
-    assert endpoints.https_origin == f"https://localhost:{REMAPPED['https-port']}"
-    assert endpoints.http_origin == f"http://localhost:{REMAPPED['http-redirect-port']}"
-    assert endpoints.gateway_port == REMAPPED["gateway-port"]
-
-
 def test_transport_gate_reads_origins_from_the_round_and_keeps_no_fallback(monkeypatch, tmp_path: Path) -> None:
+    """必须失败臂：端口重映射后，判据的目标整体跟着搬走，且没有默认值可以退回。
+
+    这三个值原样来自 ``release_endpoints``（``_arguments`` 只是把它 ``asdict`` 摊进
+    Namespace），所以重映射后的取值不必再单独测一遍 ``release_endpoints``——那会是同一条
+    代码路径上的同一组断言。
+    """
     state, _ = run_prepare(monkeypatch, tmp_path, ports=REMAPPED)
     argv = _transport_argv(state)
     monkeypatch.setattr(sys, "argv", argv)

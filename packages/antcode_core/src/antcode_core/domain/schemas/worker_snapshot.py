@@ -45,8 +45,11 @@ class WorkerSnapshotError(BaseModel):
     """
 
     column: str = Field(..., description="读不回来的列：metrics / capabilities")
+    # 不给默认值：漏配一个类别必须在构造时炸掉，而不是悄悄记成"字段漂移"——那正好复制了
+    # 本模块要消灭的"所有坏法长得一样"。产出这个对象的只有 worker_snapshot_readback 两处，
+    # 两处都显式传，没有任何路径需要退回默认。
     reason: SnapshotErrorReason = Field(
-        default=SnapshotErrorReason.FIELD_MISMATCH,
+        ...,
         description="失败类别：field_mismatch 键集/取值漂移；not_an_object 整列不是 JSON 对象",
     )
     keys: list[str] = Field(default_factory=list, description="导致失败的键名（含嵌套路径）；结构坏了时为空")

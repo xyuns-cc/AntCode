@@ -22,47 +22,40 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import antcode_core.infrastructure.redis as redis_module
 import pytest
 from antcode_core.application.services.workers.worker_dispatcher import WorkerLoadBalancer
 from antcode_core.application.services.workers.worker_load_score import PERCENT_FULL
-from antcode_core.application.services.workers.worker_metrics import normalize_worker_metrics
 from antcode_core.application.services.workers.worker_resource_probe import (
     WorkerMetricsUnavailableError,
     probe_worker_resources,
 )
-from antcode_core.domain.models.enums import WorkerStatus
 from loguru import logger
 
-_READY_FILTER = "antcode_core.application.services.workers.worker_dispatcher.filter_registration_ready_workers"
+from tests.unit.core.broken_metrics_column_support import (
+    IDLE_CPU,
+    READY_FILTER,
+    capture_logs,
+    heartbeat,
+    worker,
+)
 
-_MAX_TASKS = 10
-_IDLE_CPU = 15.0
-_IDLE_MEMORY = 20.0
 _REDIS_OUTAGE = "Connection refused by redis"
 
 
 def _worker(worker_id: int, name: str):
-    return SimpleNamespace(
-        id=worker_id,
-        public_id=f"worker-{worker_id}",
-        name=name,
-        host="10.0.0.1",
-        port=8000,
-        region=None,
-        status=WorkerStatus.ONLINE,
-        transport_mode="direct",
-        capabilities={},
-        metrics={},  # 空的落库指标，逼着走 Redis 心跳这条路
-        last_heartbeat=None,
-    )
+    # 空的落库指标，逼着走 Redis 心跳这条路。
+    return worker(worker_id, name, {})
 
 
 class _FakeRedis:
-    """按 key 决定读得到还是读不到，用来构造"一台好、一台坏"的成功臂。"""
+    """按 key 决定读得到还是读不到，用来构造"一台好、一台坏"的成功臂。
+
+    与 ``broken_metrics_column_support`` 那个只读得到的假 Redis 分开：本文件要的正是
+    "读失败"这条路径，注入失败是它独有的需求。
+    """
 
     def __init__(self, hashes: dict[str, dict[str, str]], failing: set[str]):
         self.hashes = hashes
@@ -74,38 +67,10 @@ class _FakeRedis:
         return self.hashes.get(key, {})
 
 
-def _idle_hash() -> dict[str, str]:
-    return {
-        "cpu": str(_IDLE_CPU),
-        "memory": str(_IDLE_MEMORY),
-        "disk": "10",
-        "running_tasks": "0",
-        "max_concurrent_tasks": str(_MAX_TASKS),
-        "queued_tasks": "0",
-    }
-
-
 def _install_redis(monkeypatch, *, hashes=None, failing=frozenset()):
     fake = _FakeRedis(hashes or {}, set(failing))
     monkeypatch.setattr(redis_module, "get_redis_client", AsyncMock(return_value=fake))
     return fake
-
-
-class _Records:
-    def __init__(self) -> None:
-        self.rows: list[tuple[str, str]] = []
-
-    def text(self, level: str | None = None) -> str:
-        return "\n".join(msg for lvl, msg in self.rows if level is None or lvl == level)
-
-
-def _capture() -> tuple[_Records, int]:
-    records = _Records()
-    sink_id = logger.add(
-        lambda message: records.rows.append((message.record["level"].name, message.record["message"])),
-        level="WARNING",
-    )
-    return records, sink_id
 
 
 # --------------------------------------------------------------------------------------
@@ -115,7 +80,12 @@ def _capture() -> tuple[_Records, int]:
 
 @pytest.mark.asyncio
 async def test_redis_outage_raises_instead_of_inventing_a_load_reading(monkeypatch) -> None:
-    """Redis 读失败必须抛出去，且带得出是哪台、哪个 key、什么原因。"""
+    """Redis 读失败必须抛出去，且带得出是哪台、哪个 key、什么原因。
+
+    "为什么必须抛"的依据（空 dict 经 ``normalize_worker_metrics`` 缺项补 100 之后与
+    "这台 CPU 打满了"完全同形、真的会被硬门禁踢掉）由第 4 组那条用例顺带钉住：它走的是
+    同一个 ``normalize_worker_metrics({})``，断言的也是同样的 cpu 与可用性。
+    """
     monkeypatch.setattr(
         redis_module,
         "get_redis_client",
@@ -130,19 +100,6 @@ async def test_redis_outage_raises_instead_of_inventing_a_load_reading(monkeypat
     assert _REDIS_OUTAGE in str(excinfo.value)
 
 
-def test_an_empty_metrics_dict_is_the_busiest_possible_verdict() -> None:
-    """**非证伪项**：修复前后都绿。
-
-    它不刻画修复，而是钉住上一条"为什么必须抛"的依据——把读不到兜成空 dict，经
-    ``normalize_worker_metrics`` 缺项补 100 之后，与"这台 CPU 打满了"完全同形，
-    并且真的会被硬门禁踢掉。
-    """
-    normalized = normalize_worker_metrics({})
-
-    assert normalized["cpu"] == PERCENT_FULL
-    assert WorkerLoadBalancer().is_worker_available(_worker(1, "any"), normalized) is False
-
-
 # --------------------------------------------------------------------------------------
 # 2. 全员读不到：日志必须点名真正的原因
 # --------------------------------------------------------------------------------------
@@ -153,9 +110,9 @@ async def test_dispatch_shortage_names_the_metrics_failure_not_just_no_eligible_
     """三台全读不到时，不许只留一句"无符合条件节点"。"""
     workers = [_worker(1, "mn-worker-01"), _worker(2, "mn-worker-02"), _worker(3, "mn-worker-03")]
     _install_redis(monkeypatch, failing={"worker-1", "worker-2", "worker-3"})
-    monkeypatch.setattr(_READY_FILTER, AsyncMock(return_value=workers))
+    monkeypatch.setattr(READY_FILTER, AsyncMock(return_value=workers))
 
-    records, sink_id = _capture()
+    records, sink_id = capture_logs()
     try:
         selected = await WorkerLoadBalancer().select_best_worker(workers=workers)
     finally:
@@ -180,12 +137,12 @@ async def test_healthy_worker_is_still_selected_while_another_is_unreadable(monk
     healthy, unreadable = _worker(1, "mn-healthy"), _worker(2, "mn-unreadable")
     _install_redis(
         monkeypatch,
-        hashes={"{antcode}:heartbeat:worker-1": _idle_hash()},
+        hashes={"{antcode}:heartbeat:worker-1": heartbeat(IDLE_CPU)},
         failing={"worker-2"},
     )
-    monkeypatch.setattr(_READY_FILTER, AsyncMock(return_value=[healthy, unreadable]))
+    monkeypatch.setattr(READY_FILTER, AsyncMock(return_value=[healthy, unreadable]))
 
-    records, sink_id = _capture()
+    records, sink_id = capture_logs()
     try:
         selected = await WorkerLoadBalancer().select_best_worker(workers=[healthy, unreadable])
     finally:
@@ -207,13 +164,13 @@ async def test_all_healthy_dispatch_reports_no_metrics_failure(monkeypatch) -> N
     _install_redis(
         monkeypatch,
         hashes={
-            "{antcode}:heartbeat:worker-1": _idle_hash(),
-            "{antcode}:heartbeat:worker-2": _idle_hash(),
+            "{antcode}:heartbeat:worker-1": heartbeat(IDLE_CPU),
+            "{antcode}:heartbeat:worker-2": heartbeat(IDLE_CPU),
         },
     )
-    monkeypatch.setattr(_READY_FILTER, AsyncMock(return_value=workers))
+    monkeypatch.setattr(READY_FILTER, AsyncMock(return_value=workers))
 
-    records, sink_id = _capture()
+    records, sink_id = capture_logs()
     try:
         selected = await WorkerLoadBalancer().select_best_worker(workers=workers)
     finally:
@@ -238,7 +195,7 @@ async def test_never_reported_worker_is_fail_closed_without_pretending_redis_fai
     silent = _worker(1, "mn-never-reported")
     _install_redis(monkeypatch, hashes={})
 
-    records, sink_id = _capture()
+    records, sink_id = capture_logs()
     try:
         normalized = await probe_worker_resources(silent)
     finally:

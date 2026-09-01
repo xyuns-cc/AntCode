@@ -1,8 +1,9 @@
-"""``metrics`` 列坏掉那组用例共用的装配件。
+"""派发侧那几组用例共用的装配件（Worker 行 / Redis 心跳 / 日志采集）。
 
-单独一个模块而不是塞进用例文件：派发侧与排名侧要断言的东西不同，但接的是同一套 Worker /
-Redis 心跳 / 日志采集，抄两份迟早会漂。命名不带 ``test_`` 前缀，pytest 不会收集它
-（``dispatch_epoch_support`` 是同一个惯例）。
+单独一个模块而不是塞进用例文件：``test_dispatch_survives_broken_metrics_column`` 与
+``test_dispatch_metrics_unavailable`` 断言的是两个不同的缺陷，接的却是同一套桩，抄两份
+迟早会漂。命名不带 ``test_`` 前缀，pytest 不会收集它（``dispatch_epoch_support`` 是同一个
+惯例）。注入 Redis 读失败只有后者需要，那个假 Redis 留在它自己文件里。
 """
 
 from __future__ import annotations
