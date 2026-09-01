@@ -173,21 +173,6 @@ class QueuePriorityStats(BaseModel):
     consumers: dict = Field(default_factory=dict, description="消费者信息")
 
 
-class QueueStatsInfo(BaseModel):
-    """队列统计信息"""
-
-    high: QueuePriorityStats | None = Field(None, description="高优先级队列")
-    normal: QueuePriorityStats | None = Field(None, description="普通优先级队列")
-    low: QueuePriorityStats | None = Field(None, description="低优先级队列")
-
-
-class ConsumerStatsInfo(BaseModel):
-    """消费者统计信息"""
-
-    total_consumers: int = Field(0, description="消费者总数")
-    active_workers: int = Field(0, description="活跃Worker数")
-
-
 class QueueMetricsResponse(BaseModel):
     """队列详细指标响应"""
 
@@ -292,15 +277,3 @@ class CrawlTask(BaseModel):
     parent_url: str = Field("", description="父URL")
     batch_id: str = Field("", description="批次ID")
     project_id: str = Field("", description="项目ID")
-
-
-class CrawlResult(BaseModel):
-    """爬取结果数据类"""
-
-    msg_id: str = Field(..., description="消息ID")
-    url: str = Field(..., description="URL")
-    success: bool = Field(..., description="是否成功")
-    status_code: int = Field(0, description="HTTP状态码")
-    error: str = Field("", description="错误信息")
-    data: dict = Field(default_factory=dict, description="提取的数据")
-    new_urls: list[str] = Field(default_factory=list, description="新发现的URL")

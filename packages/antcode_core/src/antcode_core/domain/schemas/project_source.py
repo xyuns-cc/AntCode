@@ -29,12 +29,6 @@ class ProjectImportItem(ProjectSourcePayload):
     runtime_config: dict | None = None
 
 
-class ProjectImportFromRepositoryRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    projects: list[ProjectImportItem] = Field(..., min_length=1)
-
-
 class ProjectSourceResponse(BaseModel):
     project_id: str
     repository_id: str
@@ -44,7 +38,3 @@ class ProjectSourceResponse(BaseModel):
     subdir: str
     include_paths: list[str]
     resolved_commit: str | None = None
-
-
-class ProjectImportResponse(BaseModel):
-    created: list[str]

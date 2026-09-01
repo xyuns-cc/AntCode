@@ -18,7 +18,6 @@ from antcode_core.application.services.crawl.backends import (
     get_queue_backend,
 )
 from antcode_core.application.services.crawl.dedup_service import calculate_url_fingerprint
-from antcode_core.common.exceptions import CrawlError
 from antcode_core.domain.models.crawl import CrawlTaskStatus
 from antcode_core.domain.models.enums import Priority
 
@@ -143,12 +142,6 @@ class TaskStatusTransition:
     from_status: str = ""
     to_status: str = ""
     error: str = ""
-
-
-class TaskStatusError(CrawlError):
-    """任务状态错误"""
-
-    pass
 
 
 class CrawlQueueService(BaseService):

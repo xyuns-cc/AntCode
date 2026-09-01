@@ -113,22 +113,3 @@ class CancellationError(ExecutionError):
         super().__init__(message, run_id=run_id, exit_code=-15, details=details)
         self.code = "CANCELLATION_ERROR"
         self.reason = reason
-
-
-class ResourceLimitError(ExecutionError):
-    """资源限制错误"""
-
-    def __init__(
-        self,
-        message: str,
-        run_id: str | None = None,
-        resource_type: str | None = None,  # memory, cpu, disk
-        limit: float | None = None,
-        actual: float | None = None,
-        details: dict[str, Any] | None = None,
-    ):
-        super().__init__(message, run_id=run_id, details=details)
-        self.code = "RESOURCE_LIMIT_ERROR"
-        self.resource_type = resource_type
-        self.limit = limit
-        self.actual = actual

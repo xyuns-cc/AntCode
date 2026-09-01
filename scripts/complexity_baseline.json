@@ -215,7 +215,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 858
+      "value": 851
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
@@ -288,24 +288,6 @@
       "function": "CrawlTestService.list_test_batches",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 568
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
-      "function": "WorkerRegistryService.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
-      "function": "WorkerRegistryService.heartbeat",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
@@ -804,12 +786,6 @@
       "function": "fast_response",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/domain/schemas/crawl.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 306
     },
     {
       "path": "packages/antcode_core/src/antcode_core/domain/schemas/project.py",
@@ -1602,12 +1578,6 @@
       "function": "ExecutionError.__init__",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "services/worker/src/antcode_worker/domain/errors.py",
-      "function": "ResourceLimitError.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
     },
     {
       "path": "services/worker/src/antcode_worker/domain/errors.py",

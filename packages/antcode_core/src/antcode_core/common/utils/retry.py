@@ -14,15 +14,6 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-class RetryError(Exception):
-    """所有重试都失败后抛出，包装最后一次的原始异常。"""
-
-    def __init__(self, attempts: int, last_error: BaseException):
-        super().__init__(f"重试 {attempts} 次后仍失败: {last_error!r}")
-        self.attempts = attempts
-        self.last_error = last_error
-
-
 def _compute_backoff(attempt: int, base_delay: float, max_delay: float) -> float:
     """指数退避 + [0.5, 1.5) 倍随机 jitter，避免雪崩。"""
     delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
