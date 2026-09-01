@@ -7,7 +7,6 @@
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 from loguru import logger
 
@@ -26,13 +25,12 @@ from antcode_core.application.services.workers.worker_capability_routing import 
     supports_task_types,
 )
 from antcode_core.application.services.workers.worker_dispatch_failure import failed_batch_dispatch
-from antcode_core.application.services.workers.worker_liveness import heartbeat_age_ms
-from antcode_core.application.services.workers.worker_load_score import PERCENT_FULL, calculate_load_score
+from antcode_core.application.services.workers.worker_load_score import calculate_load_score
+from antcode_core.application.services.workers.worker_ranking import build_worker_rankings
 from antcode_core.application.services.workers.worker_registration_gate import filter_registration_ready_workers
 from antcode_core.application.services.workers.worker_resource_probe import (
     WorkerMetricsUnavailableError,
     collect_dispatch_candidates,
-    merge_worker_metrics,
     probe_failure_suffix,
     probe_worker_resources,
     warn_unreadable_workers,
@@ -123,9 +121,6 @@ class WorkerLoadBalancer:
         if (asyncio.get_event_loop().time() - cached_at) > self._resource_cache_ttl:
             return None
         return cached
-
-    def _merge_metrics(self, worker_metrics, resource_metrics):
-        return merge_worker_metrics(worker_metrics, resource_metrics)
 
     async def _fetch_resources(self, worker):
         try:
@@ -295,50 +290,17 @@ class WorkerLoadBalancer:
         return supports_task_types(worker.capabilities, task_type)
 
     async def get_workers_ranking(self, region=None, top_n=10):
-        """获取节点排名"""
+        """获取节点排名（只读展示，行的装配见 worker_ranking）。"""
         query = Worker.filter(status=WorkerStatus.ONLINE.value)
         if region:
             query = query.filter(region=region)
-
         workers = await query.all()
 
-        rankings: list[dict[str, Any]] = []
         resource_results = await asyncio.gather(
             *[self._refresh_resources(worker) for worker in workers],
             return_exceptions=True,
         )
-
-        for worker, resource_metrics in zip(workers, resource_results, strict=False):
-            if isinstance(resource_metrics, Exception) or not resource_metrics:
-                score = PERCENT_FULL
-                available = False
-                metrics = {}
-            else:
-                metrics = self._merge_metrics(worker.metrics, resource_metrics)
-                score = calculate_load_score(metrics)
-                available = self.is_worker_available(worker, metrics)
-
-            rankings.append(
-                {
-                    "worker_id": worker.public_id,
-                    "name": worker.name,
-                    "host": worker.host,
-                    "port": worker.port,
-                    "region": worker.region,
-                    "load_score": score,
-                    "available": available,
-                    "metrics": metrics,
-                    # 曾经叫 latency_ms，但它从来就是 now - last_heartbeat，不是网络往返；
-                    # 这个仓库没有任何 Master→Worker 的探活通道能测出往返（派发单向走 Redis
-                    # Stream，worker_connection_service.test_connection 也只标 heartbeat）。
-                    # 判据删掉之后更不能留一个名字说谎的展示字段。
-                    "heartbeat_age_ms": heartbeat_age_ms(worker.last_heartbeat),
-                }
-            )
-
-        rankings.sort(key=lambda x: x["load_score"])
-
-        return rankings[:top_n]
+        return build_worker_rankings(self, workers, resource_results)[:top_n]
 
 
 class WorkerTaskDispatcher:

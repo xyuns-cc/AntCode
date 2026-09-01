@@ -78,9 +78,31 @@ async def _read_heartbeat_hash(worker: Any) -> dict[Any, Any]:
     return raw
 
 
+def persisted_worker_metrics(worker: Any) -> Mapping[str, Any] | None:
+    """``workers.metrics`` 这一列的契约是 JSON 对象；读这一列**只许**走这里。
+
+    ORM 上它标着 ``JSONField[dict[str, Any] | None]``，但那个标注管不住 jsonb：这一列由
+    Worker 二进制写、由控制面读（``worker_snapshot`` 的模块注释讲的就是这件事），实际存进
+    数组或被二次编码成字符串都发生过。所以类型注解在这里不是保证，只有运行期契约检查是。
+
+    列坏了是**这一台**的数据问题，既不是"它很忙"也不是"我们读不到"——实时读数另有 Redis
+    心跳这条独立来源，照常读得回来就照常参与派发。所以这里不抛也不静默：降级成"没有落库
+    指标"，同时打一条点名的 WARNING，让"是谁写坏了这一列"查得下去。
+    """
+    raw = worker.metrics
+    if raw is None or isinstance(raw, Mapping):
+        return raw
+    logger.warning(
+        "Worker [{}] 的 metrics 列不是 JSON 对象（实际是 {}），本轮忽略落库指标、只用心跳读数",
+        worker.name,
+        type(raw).__name__,
+    )
+    return None
+
+
 async def probe_worker_resources(worker: Any) -> dict[str, float | int]:
     """返回归一化后的负载指标；Redis 读不到时抛 ``WorkerMetricsUnavailableError``。"""
-    persisted = worker.metrics if isinstance(worker.metrics, Mapping) else {}
+    persisted = persisted_worker_metrics(worker)
     if persisted:
         return normalize_worker_metrics(persisted)
 
@@ -88,8 +110,13 @@ async def probe_worker_resources(worker: Any) -> dict[str, float | int]:
     return normalize_worker_metrics({_decode(key): _decode(value) for key, value in raw.items()})
 
 
-def merge_worker_metrics(persisted: Any, probed: Any) -> dict[str, Any]:
-    """落库指标打底、实时探测覆盖。"""
+def merge_worker_metrics(persisted: Mapping[str, Any] | None, probed: Mapping[str, Any] | None) -> dict[str, Any]:
+    """落库指标打底、实时探测覆盖；``persisted`` 必须是 ``persisted_worker_metrics`` 的产物。
+
+    ``dict.update`` 接受任何"键值对序列"，所以拿未经契约检查的列直接喂进来时，list/str
+    要么按 ``ValueError`` 炸掉调用方，要么（``["ab", "cd"]`` 这种）被悄悄拆成
+    ``{"a": "b", "c": "d"}`` —— 后者更坏，它把坏列变成了一份看着正常的指标。
+    """
     merged: dict[str, Any] = {}
     if persisted:
         merged.update(persisted)
@@ -115,7 +142,16 @@ def collect_dispatch_candidates(
     workers: Sequence[Any],
     resource_results: Sequence[Any],
 ) -> DispatchCandidates:
-    """把探测结果分成候选、指标读不回来的、以及其余落选的。"""
+    """把探测结果分成候选、指标读不回来的、以及其余落选的。
+
+    这里**只**用探测读数打分，不再把落库的 ``worker.metrics`` 并进来。判据（硬门禁的
+    cpu/memory/runningTasks/maxConcurrentTasks 与 ``LOAD_JUDGEMENTS`` 的三项）全部落在
+    ``normalize_worker_metrics`` 返回的那六个键上，而那六个键 ``probed`` 一定齐备、又恰好
+    在合并里覆盖掉落库的同名键——也就是说落库那一层对派发结论的贡献恒为零，唯一的效果是
+    把一列信不过的 jsonb 的形状风险搬进派发热路径：一台的坏列会以 ``ValueError`` 掀掉整轮
+    选节点，而它连排序都没参与。要新增判据就先把对应的键加进 ``normalize_worker_metrics``，
+    不要绕道从落库列取。
+    """
     scored: list[tuple[Any, dict[str, Any]]] = []
     unreadable: list[str] = []
     for worker, probed in zip(workers, resource_results, strict=False):
@@ -125,11 +161,10 @@ def collect_dispatch_candidates(
         if isinstance(probed, BaseException) or not probed:
             logger.warning("Worker [{}] 的负载指标不可用，本轮不参与派发: {}", worker.name, probed)
             continue
-        metrics = merge_worker_metrics(worker.metrics, probed)
-        if not balancer.is_worker_available(worker, metrics):
+        if not balancer.is_worker_available(worker, probed):
             logger.debug(f"节点不可用 [{worker.name}]")
             continue
-        scored.append((worker, metrics))
+        scored.append((worker, probed))
     return DispatchCandidates(scored=tuple(scored), unreadable=tuple(unreadable))
 
 
@@ -156,6 +191,7 @@ __all__ = [
     "WorkerMetricsUnavailableError",
     "collect_dispatch_candidates",
     "merge_worker_metrics",
+    "persisted_worker_metrics",
     "probe_failure_suffix",
     "probe_worker_resources",
     "warn_unreadable_workers",

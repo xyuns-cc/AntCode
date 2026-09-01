@@ -629,7 +629,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 808
+      "value": 770
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
