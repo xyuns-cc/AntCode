@@ -31,6 +31,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from scripts.release_e2e_endpoints import release_endpoints
+from scripts.release_e2e_environment import RUNNER_HOST
 from scripts.release_e2e_pki import _create_ca, _create_leaf, _pem_cert, _pem_key
 from scripts.release_e2e_tls_probe import (
     ClientIdentity,
@@ -86,16 +88,18 @@ class _Baseline:
 
 
 def _arguments() -> argparse.Namespace:
+    """Gateway 端口从本轮 `production.env` 读，脚本不再自带一份 15051 默认值。"""
     parser = argparse.ArgumentParser()
+    parser.add_argument("--environment", type=Path, required=True, help="本轮 production.env")
     parser.add_argument("--gateway-tls-dir", type=Path, required=True, help="宿主侧目录，绑定到容器 /etc/antcode/tls")
     parser.add_argument("--ca-cert", type=Path, required=True)
     parser.add_argument("--ca-key", type=Path, required=True, help="签发现网服务端证书的 CA 私钥，用于重签")
     parser.add_argument("--client-cert", type=Path, required=True)
     parser.add_argument("--client-key", type=Path, required=True)
     parser.add_argument("--gateway-container", required=True, help="docker inspect / docker logs 的目标容器")
-    parser.add_argument("--gateway-host", default="localhost")
-    parser.add_argument("--gateway-port", type=int, default=15051)
-    return parser.parse_args()
+    parser.add_argument("--gateway-host", default=RUNNER_HOST)
+    parsed = parser.parse_args()
+    return argparse.Namespace(**vars(parsed), gateway_port=release_endpoints(parsed.environment).gateway_port)
 
 
 def _require(satisfied: bool, failure: str) -> None:

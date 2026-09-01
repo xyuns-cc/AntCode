@@ -2,7 +2,6 @@ import ipaddress
 import json
 import ssl
 import stat
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -14,75 +13,24 @@ from antcode_core.common.config import Settings
 from cryptography import x509
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from scripts import (
-    prepare_local_release_e2e,
-    release_e2e_environment,
-    release_e2e_orchestrator,
-    verify_release_transport,
-)
+from scripts import release_e2e_environment, verify_release_transport
 from scripts.release_e2e_pki import write_worker_identity_certificate
+from tests.unit.scripts.release_e2e_support import (
+    DIGEST_LENGTH,
+    IMAGE_TAG,
+    RUNTIMES,
+    SERVICES,
+    digest,
+    environment_values,
+    run_prepare,
+    write_runtime_lock,
+)
 
-SERVICES = ("web-api", "master", "gateway", "worker", "frontend")
-RUNTIMES = ("postgres", "redis", "reverse-proxy")
-REVISION = "a" * 40
-IMAGE_TAG = "gateway-e2e"
-SOURCE_URL = "https://github.com/example/antcode.git"
 EXPECTED_PRIVATE_FILE_MODE = 0o600
-DIGEST_LENGTH = 64
-
-
-def _digest(character: str) -> str:
-    return f"sha256:{character * DIGEST_LENGTH}"
-
-
-def _write_runtime_lock(root: Path) -> Path:
-    lock = root / "runtime.json"
-    images = {name: f"registry.example/{name}@{_digest('d')}" for name in RUNTIMES}
-    lock.write_text(json.dumps({"schema_version": 1, "images": images}), encoding="utf-8")
-    return lock
-
-
-def _run_prepare(monkeypatch: pytest.MonkeyPatch, root: Path, workers: int = 1) -> tuple[Path, Path]:
-    state = root / "state"
-    runner_env = root / "runner.env"
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "prepare_local_release_e2e",
-            "--output-dir",
-            str(state),
-            "--runtime-lock",
-            str(_write_runtime_lock(root)),
-            "--image-tag",
-            IMAGE_TAG,
-            "--source-url",
-            SOURCE_URL,
-            "--source-ref",
-            REVISION,
-            "--runner-env",
-            str(runner_env),
-            "--https-port",
-            str(release_e2e_environment.DEFAULT_HTTPS_PORT),
-            "--http-redirect-port",
-            str(release_e2e_environment.DEFAULT_HTTP_REDIRECT_PORT),
-            "--gateway-port",
-            str(release_e2e_environment.DEFAULT_GATEWAY_PUBLIC_PORT),
-            "--workers",
-            str(workers),
-        ],
-    )
-    prepare_local_release_e2e.main()
-    return state, runner_env
-
-
-def _environment_values(state: Path) -> dict[str, str]:
-    production_env = (state / "production.env").read_text(encoding="utf-8")
-    return dict(line.split("=", maxsplit=1) for line in production_env.splitlines())
 
 
 def test_prepare_material_is_ephemeral_path_only_and_exports_complete_e2e_env(monkeypatch, tmp_path: Path) -> None:
-    state, runner_env = _run_prepare(monkeypatch, tmp_path)
+    state, runner_env = run_prepare(monkeypatch, tmp_path)
     production_env = (state / "production.env").read_text(encoding="utf-8")
     exports = runner_env.read_text(encoding="utf-8")
 
@@ -100,7 +48,7 @@ def test_prepare_material_is_ephemeral_path_only_and_exports_complete_e2e_env(mo
         if secret:
             assert secret not in production_env
     assert stat.S_IMODE((state / "ca.key").stat().st_mode) == EXPECTED_PRIVATE_FILE_MODE
-    values = _environment_values(state)
+    values = environment_values(state)
     edge_subnet = ipaddress.ip_network(values["ANTCODE_EDGE_SUBNET"])
     assert ipaddress.ip_address(values["ANTCODE_REVERSE_PROXY_EDGE_IP"]) != next(edge_subnet.hosts())
 
@@ -108,7 +56,7 @@ def test_prepare_material_is_ephemeral_path_only_and_exports_complete_e2e_env(mo
 def test_prepare_lays_out_one_install_key_tls_dir_and_env_file_per_worker(monkeypatch, tmp_path: Path) -> None:
     """安装 Key 一次性消费、客户端证书 CN 即 worker_id，两者都必须逐 Worker 独立。"""
     workers = 3
-    state, _ = _run_prepare(monkeypatch, tmp_path, workers=workers)
+    state, _ = run_prepare(monkeypatch, tmp_path, workers=workers)
     fleet = json.loads((state / release_e2e_environment.FLEET_FILE).read_text(encoding="utf-8"))
 
     assert fleet["count"] == workers
@@ -124,9 +72,9 @@ def test_prepare_lays_out_one_install_key_tls_dir_and_env_file_per_worker(monkey
 
 def test_application_images_are_tag_referenced_and_runtimes_stay_digest_pinned(monkeypatch, tmp_path: Path) -> None:
     """本地构建只放弃自研镜像的 digest 引用；第三方运行时镜像仍必须按 digest pin。"""
-    state, _ = _run_prepare(monkeypatch, tmp_path)
+    state, _ = run_prepare(monkeypatch, tmp_path)
     images = json.loads((state / "release-images.json").read_text(encoding="utf-8"))
-    values = _environment_values(state)
+    values = environment_values(state)
 
     assert set(images) == {*SERVICES, *RUNTIMES}
     assert values["ANTCODE_IMAGE_TAG"] == IMAGE_TAG
@@ -134,12 +82,12 @@ def test_application_images_are_tag_referenced_and_runtimes_stay_digest_pinned(m
         assert images[service] == f"antcode-{service}:{IMAGE_TAG}"
         assert f"ANTCODE_{service.replace('-', '_').upper()}_IMAGE_DIGEST" not in values
     for runtime in RUNTIMES:
-        assert images[runtime].endswith(_digest("d"))
+        assert images[runtime].endswith(digest("d"))
         assert values[f"ANTCODE_{runtime.replace('-', '_').upper()}_IMAGE_DIGEST"] == "d" * DIGEST_LENGTH
 
 
 def test_release_pki_has_expected_ca_san_eku_and_rotated_worker_identity(monkeypatch, tmp_path: Path) -> None:
-    state, _ = _run_prepare(monkeypatch, tmp_path)
+    state, _ = run_prepare(monkeypatch, tmp_path)
     ca = x509.load_pem_x509_certificate((state / "public-ca.crt").read_bytes())
     gateway = x509.load_pem_x509_certificate((state / "gateway-tls/server.crt").read_bytes())
     bootstrap = x509.load_pem_x509_certificate((state / "worker-tls/client.crt").read_bytes())
@@ -167,32 +115,15 @@ def test_release_pki_has_expected_ca_san_eku_and_rotated_worker_identity(monkeyp
     rotated.verify_directly_issued_by(ca)
 
 
-@pytest.mark.parametrize("reference", ["postgres:16", "postgres@sha256:not-hex", f"postgres@{_digest('A')}"])
-def test_runtime_image_lock_rejects_noncanonical_digest(tmp_path: Path, reference: str) -> None:
-    lock = _write_runtime_lock(tmp_path)
+@pytest.mark.parametrize("reference", ["postgres:16", "postgres@sha256:not-hex", f"postgres@{digest('A')}"])
+def test_runtime_image_lock_rejects_noncanonicaldigest(tmp_path: Path, reference: str) -> None:
+    lock = write_runtime_lock(tmp_path)
     payload = json.loads(lock.read_text(encoding="utf-8"))
     payload["images"]["postgres"] = reference
     lock.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="not digest locked"):
         release_e2e_environment.runtime_images(lock)
-
-
-def test_release_orchestrator_exact_image_validation_rejects_mismatch(monkeypatch, tmp_path: Path) -> None:
-    expected = {name: f"registry.example/{name}@{_digest('f')}" for name in (*SERVICES, *RUNTIMES)}
-    (tmp_path / "release-images.json").write_text(json.dumps(expected), encoding="utf-8")
-    control = {name: {"image": expected[name]} for name in (*RUNTIMES, "web-api", "master", "gateway", "frontend")}
-    worker = {"worker": {"image": expected["worker"]}}
-
-    def fake_run(command: list[str], *, capture: bool = False) -> str:
-        services = worker if any("prod.worker.yml" in item for item in command) else control
-        return json.dumps({"services": services})
-
-    monkeypatch.setattr(release_e2e_orchestrator, "_run", fake_run)
-    release_e2e_orchestrator._validate_exact_images(tmp_path / "production.env", tmp_path)
-    worker["worker"]["image"] = f"registry.example/worker@{_digest('0')}"
-    with pytest.raises(RuntimeError, match="Worker image mismatch"):
-        release_e2e_orchestrator._validate_exact_images(tmp_path / "production.env", tmp_path)
 
 
 def test_e2e_compose_overrides_preserve_production_tls_and_worker_sandbox() -> None:

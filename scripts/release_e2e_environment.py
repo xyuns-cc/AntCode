@@ -14,6 +14,7 @@ import secrets
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from scripts.release_e2e_pki import DEFAULT_WORKER_TLS_DIR, write_release_pki
 
@@ -47,6 +48,10 @@ SALT_TOKEN_BYTES = 16
 DEFAULT_GATEWAY_PUBLIC_PORT = 15051
 DEFAULT_HTTPS_PORT = 443
 DEFAULT_HTTP_REDIRECT_PORT = 80
+#: scheme 的默认端口。等于默认端口时 origin 不带端口，与 URL 规范化一致。
+DEFAULT_PORTS = MappingProxyType({"https": DEFAULT_HTTPS_PORT, "http": DEFAULT_HTTP_REDIRECT_PORT})
+#: 宿主侧访问名。容器侧必须用 CONTAINER_HOST_ALIAS，两者不可互换（见 host_git_base_url）。
+RUNNER_HOST = "localhost"
 DEFAULT_UV_VERSION = "0.8.17"
 DEFAULT_POSTGRES_HOST_PORT = 15432
 DEFAULT_REDIS_HOST_PORT = 16379
@@ -55,6 +60,22 @@ DEFAULT_REDIS_HOST_PORT = 16379
 CONTAINER_HOST_ALIAS = "host.docker.internal"
 #: TEST-NET-1 的 discard 端口：UDP connect 只让内核按路由表挑出源地址，不发任何报文。
 ROUTE_PROBE_ENDPOINT = ("192.0.2.1", 9)
+
+
+def _origin(host: str, scheme: str, port: int) -> str:
+    if port == DEFAULT_PORTS[scheme]:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def runner_origin(scheme: str, port: int) -> str:
+    """宿主侧（pytest 与发布门禁脚本）访问本轮反向代理的 origin。
+
+    端口必须是本轮 Compose 真正发布出去的那个。门禁每一步都要打在它上面，否则判据
+    分不清"本轮起的栈"和"共享测试机上别人占着的 :443"——写死 localhost 默认值正是
+    875e6dd 在 [3/7] 清掉的那个形状。
+    """
+    return _origin(RUNNER_HOST, scheme, port)
 
 
 @dataclass(frozen=True)
@@ -73,15 +94,11 @@ class ReleaseE2ESettings:
 
     @property
     def public_api_origin(self) -> str:
-        if self.https_port == DEFAULT_HTTPS_PORT:
-            return f"https://{CONTAINER_HOST_ALIAS}"
-        return f"https://{CONTAINER_HOST_ALIAS}:{self.https_port}"
+        return _origin(CONTAINER_HOST_ALIAS, "https", self.https_port)
 
     @property
     def runner_api_origin(self) -> str:
-        if self.https_port == DEFAULT_HTTPS_PORT:
-            return "https://localhost"
-        return f"https://localhost:{self.https_port}"
+        return runner_origin("https", self.https_port)
 
 
 def write(path: Path, value: str, mode: int = FILE_MODE) -> None:

@@ -5,10 +5,15 @@ from __future__ import annotations
 import argparse
 import socket
 import ssl
+from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import grpc
 import httpx
+
+from scripts.release_e2e_endpoints import release_endpoints
+from scripts.release_e2e_environment import RUNNER_HOST
 
 HTTP_TIMEOUT_SECONDS = 15.0
 GRPC_TIMEOUT_SECONDS = 10.0
@@ -28,28 +33,42 @@ EXACTLY_ONCE_SECURITY_HEADERS = {
 
 
 def _arguments() -> argparse.Namespace:
+    """origin 与端口一律从本轮 `production.env` 推导，本脚本不带任何端口默认值。
+
+    带默认值时 run-gateway-e2e.sh 从来没传过 origin，端口一重映射判据就打到 :443 / :80
+    上——共享测试机上那可能是别人的栈，而它设的正是同一组安全头，"连通 + 头对"因此
+    无法区分被验对象是谁。
+    """
     parser = argparse.ArgumentParser()
+    parser.add_argument("--environment", type=Path, required=True, help="本轮 production.env")
     parser.add_argument("--ca", type=Path, required=True)
     parser.add_argument("--client-cert", type=Path, required=True)
     parser.add_argument("--client-key", type=Path, required=True)
-    parser.add_argument("--gateway-host", default="localhost")
-    parser.add_argument("--gateway-port", type=int, default=15051)
-    parser.add_argument("--https-origin", default="https://localhost")
-    parser.add_argument("--http-origin", default="http://localhost")
+    parser.add_argument("--gateway-host", default=RUNNER_HOST)
     parser.add_argument("--worker-id", required=True, help="--client-cert 的 CN，即该证书的合法主体")
     parser.add_argument("--peer-worker-id", default="", help="另一个已注册 Worker 的 ID；多 Worker 拓扑下必给")
-    return parser.parse_args()
+    parsed = parser.parse_args()
+    return argparse.Namespace(**vars(parsed), **asdict(release_endpoints(parsed.environment)))
+
+
+def _verify_redirect(response: httpx.Response, https_origin: str) -> None:
+    """308 目标由 nginx 的 `$host` 拼出，而 `$host` 已被 nginx 剥掉端口。
+
+    发布 E2E 允许把 443/80 重映射到别的宿主端口，那是测试机上的编排细节，不属于生产
+    契约，所以这里只钉死"跳到同一主机的 HTTPS 且路径原样"。端口由紧随其后那次 ready
+    请求负责证明：它连的是本轮真正发布的端口，并且用本轮一次性 CA 校验服务端。
+    """
+    expected = f"https://{urlsplit(https_origin).hostname}/"
+    if response.status_code != HTTP_PERMANENT_REDIRECT_STATUS or response.headers.get("location") != expected:
+        raise RuntimeError(
+            "production HTTP endpoint did not redirect to the exact HTTPS origin: "
+            f"status={response.status_code} location={response.headers.get('location')!r} expected={expected!r}"
+        )
 
 
 def _verify_https(args: argparse.Namespace) -> None:
     with httpx.Client(verify=str(args.ca), timeout=HTTP_TIMEOUT_SECONDS) as client:
-        redirect = client.get(args.http_origin, follow_redirects=False)
-        expected_location = f"{args.https_origin.rstrip('/')}/"
-        if (
-            redirect.status_code != HTTP_PERMANENT_REDIRECT_STATUS
-            or not redirect.headers.get("location", "") == expected_location
-        ):
-            raise RuntimeError("production HTTP endpoint did not redirect to the exact HTTPS origin")
+        _verify_redirect(client.get(args.http_origin, follow_redirects=False), args.https_origin)
         ready = client.get(f"{args.https_origin}/api/v1/health/ready")
         ready.raise_for_status()
         _verify_security_headers(ready)

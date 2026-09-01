@@ -13,6 +13,9 @@ import re
 from pathlib import Path
 
 from scripts.release_e2e_environment import (
+    DEFAULT_GATEWAY_PUBLIC_PORT,
+    DEFAULT_HTTP_REDIRECT_PORT,
+    DEFAULT_HTTPS_PORT,
     ReleaseE2ESettings,
     runner_environment,
     runtime_images,
@@ -32,9 +35,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--source-url", required=True)
     parser.add_argument("--source-ref", required=True)
     parser.add_argument("--runner-env", type=Path, required=True)
-    parser.add_argument("--https-port", type=int, required=True)
-    parser.add_argument("--http-redirect-port", type=int, required=True)
-    parser.add_argument("--gateway-port", type=int, required=True)
+    # 端口默认值只在 release_e2e_environment 定义一份；run-gateway-e2e.sh 只在调用方
+    # 显式覆盖时才传，脚本侧不再抄一份 443 / 80 / 15051。
+    parser.add_argument("--https-port", type=int, default=DEFAULT_HTTPS_PORT)
+    parser.add_argument("--http-redirect-port", type=int, default=DEFAULT_HTTP_REDIRECT_PORT)
+    parser.add_argument("--gateway-port", type=int, default=DEFAULT_GATEWAY_PUBLIC_PORT)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKER_COUNT)
     return parser.parse_args()
 

@@ -12,9 +12,11 @@ from typing import cast
 
 import httpx
 
+from scripts import release_e2e_provenance
 from scripts.release_e2e_compose import control as control_compose
 from scripts.release_e2e_compose import run as _run
 from scripts.release_e2e_compose import worker as worker_compose
+from scripts.release_e2e_endpoints import release_endpoints
 from scripts.release_e2e_environment import FLEET_FILE, RUNTIME_SERVICES
 from scripts.release_e2e_workers import (
     Fleet,
@@ -28,7 +30,6 @@ from scripts.release_e2e_workers import (
 from tests.e2e.conftest import E2EConfig
 from tests.e2e.helpers import get_workers, login
 
-PUBLIC_API_ORIGIN = "https://localhost"
 CONTROL_START_TIMEOUT_SECONDS = 600
 MIDDLEWARE_START_TIMEOUT_SECONDS = 300
 
@@ -53,24 +54,20 @@ def _admin_config(password: str) -> E2EConfig:
 
 
 def _validate_exact_images(environment: Path, state_dir: Path) -> None:
+    """第三方运行时镜像验 digest pin；五个应用镜像验它们仍是 `[2/7]` 记下的那个 image ID。
+
+    应用镜像原先比的是**名字**，而期望名与 Compose 里的 `${ANTCODE_IMAGE_TAG}` 同源，
+    那条断言恒真、只能验出 Compose 写错服务名——见 release_e2e_provenance 的模块注释。
+    """
     expected = json.loads((state_dir / "release-images.json").read_text(encoding="utf-8"))
     control_config = json.loads(_run([*control_compose(environment), "config", "--format", "json"], capture=True))
     worker_config = json.loads(_run([*worker_compose(environment), "config", "--format", "json"], capture=True))
     service_images = {name: service["image"] for name, service in control_config["services"].items()}
-    checks = {
-        "postgres": expected["postgres"],
-        "redis": expected["redis"],
-        "web-api": expected["web-api"],
-        "master": expected["master"],
-        "gateway": expected["gateway"],
-        "frontend": expected["frontend"],
-        "reverse-proxy": expected["reverse-proxy"],
-    }
-    for service, image in checks.items():
-        if service_images.get(service) != image:
+    service_images["worker"] = worker_config["services"]["worker"]["image"]
+    for service in RUNTIME_SERVICES:
+        if service_images.get(service) != expected[service]:
             raise RuntimeError(f"production Compose image mismatch: {service}")
-    if worker_config["services"]["worker"]["image"] != expected["worker"]:
-        raise RuntimeError("production Worker image mismatch")
+    release_e2e_provenance.validate(state_dir, service_images)
 
 
 def _start_control(environment: Path) -> None:
@@ -87,16 +84,22 @@ def _start_control(environment: Path) -> None:
     _run([*control, "up", "-d", "--wait", "--wait-timeout", str(CONTROL_START_TIMEOUT_SECONDS), *services])
 
 
-def _admin_client(state_dir: Path) -> httpx.AsyncClient:
-    verify = str(state_dir / "public-ca.crt")
-    return httpx.AsyncClient(base_url=PUBLIC_API_ORIGIN, verify=verify, timeout=30.0)
+def _admin_client(fleet: Fleet) -> httpx.AsyncClient:
+    """公网入口取本轮真正发布出去的 origin，而不是写死的 `https://localhost`。
+
+    端口一被重映射，写死值就会去登录别人的 :443——共享测试机上那会变成"用别人的栈
+    验本轮的发布"，报错还难以解释。
+    """
+    verify = str(fleet.state_dir / "public-ca.crt")
+    origin = release_endpoints(fleet.environment).https_origin
+    return httpx.AsyncClient(base_url=origin, verify=verify, timeout=30.0)
 
 
 async def _bootstrap_fleet(fleet: Fleet) -> list[str]:
     """注册 -> 各自持久化身份 -> 控制台核对 -> 按 worker_id 重签证书走 mTLS。"""
     password = (fleet.state_dir / "secrets/default_admin_password").read_text(encoding="utf-8")
     config = _admin_config(password)
-    async with _admin_client(fleet.state_dir) as client:
+    async with _admin_client(fleet) as client:
         token = await login(client, config)
         baseline = {str(worker["id"]) for worker in await get_workers(client, token)}
         install_keys = await create_install_keys(client, token, fleet.count)

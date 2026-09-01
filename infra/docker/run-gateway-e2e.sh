@@ -20,7 +20,7 @@
 # 用法：
 #   infra/docker/run-gateway-e2e.sh                 # 构建镜像后跑
 #   ANTCODE_GATEWAY_E2E_WORKERS=2 …/run-gateway-e2e.sh      # 起 2 个 mTLS Worker
-#   ANTCODE_GATEWAY_E2E_SKIP_BUILD=1 …/run-gateway-e2e.sh   # 复用上一轮镜像
+#   ANTCODE_GATEWAY_E2E_SKIP_BUILD=1 …/run-gateway-e2e.sh   # 复用上一轮镜像，仅供调试，不是发布门禁
 #   ANTCODE_GATEWAY_E2E_KEEP=1 …/run-gateway-e2e.sh         # 失败后保留栈排查
 #
 set -euo pipefail
@@ -31,12 +31,18 @@ STATE_DIR="${ANTCODE_GATEWAY_E2E_STATE_DIR:-/tmp/antcode-gateway-e2e}/run"
 CONTROL_PROJECT="antcode-release-control"
 WORKER_PROJECT="antcode-release-worker"
 WORKERS="${ANTCODE_GATEWAY_E2E_WORKERS:-1}"
-HTTPS_PORT="${ANTCODE_GATEWAY_E2E_HTTPS_PORT:-443}"
-HTTP_REDIRECT_PORT="${ANTCODE_GATEWAY_E2E_HTTP_PORT:-80}"
-GATEWAY_PORT="${ANTCODE_GATEWAY_E2E_GATEWAY_PORT:-15051}"
+ENVIRONMENT_FILE="$STATE_DIR/production.env"
 # WORKER_INSTALL_SOURCE_URL 只进安装脚本模板，E2E 期间没有任何进程去 clone 它，
 # 但 web_api 的 worker_installer 会 fail-closed 校验它必须是 HTTPS Git 地址。
 SOURCE_URL="${ANTCODE_GATEWAY_E2E_SOURCE_URL:-https://github.com/antcode/antcode.git}"
+
+# 端口默认值只在 scripts/release_e2e_environment.py 定义一份（[3/7] 已为 18081 立过这条
+# 规矩），这里只在调用方显式覆盖时才把值透传给 prepare。此后每一步用的端口都从
+# production.env 读回，谁也不再自带 443 / 80 / 15051。
+PORT_OVERRIDES=()
+[ -z "${ANTCODE_GATEWAY_E2E_HTTPS_PORT:-}" ] || PORT_OVERRIDES+=(--https-port "$ANTCODE_GATEWAY_E2E_HTTPS_PORT")
+[ -z "${ANTCODE_GATEWAY_E2E_HTTP_PORT:-}" ] || PORT_OVERRIDES+=(--http-redirect-port "$ANTCODE_GATEWAY_E2E_HTTP_PORT")
+[ -z "${ANTCODE_GATEWAY_E2E_GATEWAY_PORT:-}" ] || PORT_OVERRIDES+=(--gateway-port "$ANTCODE_GATEWAY_E2E_GATEWAY_PORT")
 
 log() { printf '=== %s\n' "$*"; }
 
@@ -51,7 +57,7 @@ log() { printf '=== %s\n' "$*"; }
 UV_RUN=(uv run --frozen --all-packages --extra dev)
 
 control_compose() {
-  docker compose --env-file "$STATE_DIR/production.env" -p "$CONTROL_PROJECT" \
+  docker compose --env-file "$ENVIRONMENT_FILE" -p "$CONTROL_PROJECT" \
     -f "$ROOT/infra/docker/docker-compose.prod.yml" \
     -f "$ROOT/infra/docker/docker-compose.prod.e2e-control.yml" "$@"
 }
@@ -69,7 +75,7 @@ worker_compose() {
     # shellcheck disable=SC1090
     . "$STATE_DIR/worker-$index.env"
     set +a
-    docker compose --env-file "$STATE_DIR/production.env" -p "$project" \
+    docker compose --env-file "$ENVIRONMENT_FILE" -p "$project" \
       -f "$ROOT/infra/docker/docker-compose.prod.worker.yml" \
       -f "$ROOT/infra/docker/docker-compose.prod.e2e-worker.yml" "$@"
   )
@@ -81,7 +87,7 @@ worker_indexes() {
 
 teardown() {
   local status=$?
-  if [ -f "$STATE_DIR/production.env" ] && [ "$status" -ne 0 ]; then
+  if [ -f "$ENVIRONMENT_FILE" ] && [ "$status" -ne 0 ]; then
     log "失败诊断"
     control_compose ps || true
     control_compose logs --no-color --tail=200 || true
@@ -99,7 +105,7 @@ teardown() {
   if [ -f "$STATE_DIR/git-http.pid" ]; then
     kill "$(cat "$STATE_DIR/git-http.pid")" 2>/dev/null || true
   fi
-  if [ -f "$STATE_DIR/production.env" ]; then
+  if [ -f "$ENVIRONMENT_FILE" ]; then
     for index in $(worker_indexes); do
       worker_compose "$index" down -v --remove-orphans || true
     done
@@ -140,17 +146,23 @@ resolve_source_ref() {
 }
 
 build_images() {
+  local reused=()
   if [ "${ANTCODE_GATEWAY_E2E_SKIP_BUILD:-0}" = "1" ]; then
     log "[2/7] 跳过构建，复用现有 :$TAG 镜像"
-    return
+    reused=(--reused)
+  else
+    # 走生产 Compose 自己的 build 段，而不是另写一份 docker build：E2E 验的镜像与
+    # deploy-production.sh 部署的镜像必须由同一处定义产出，否则两者会悄悄分叉。
+    # control 栈里的 worker 在 co-located-worker profile 后面，compose build 不会碰它；
+    # worker 镜像由 worker 栈构建，两边指向同一个 Dockerfile 与同一个 tag。
+    log "[2/7] 用生产 Compose 的 build 段就地构建五个应用镜像"
+    control_compose build
+    worker_compose 0 build
   fi
-  # 走生产 Compose 自己的 build 段，而不是另写一份 docker build：E2E 验的镜像与
-  # deploy-production.sh 部署的镜像必须由同一处定义产出，否则两者会悄悄分叉。
-  # control 栈里的 worker 在 co-located-worker profile 后面，compose build 不会碰它；
-  # worker 镜像由 worker 栈构建，两边指向同一个 Dockerfile 与同一个 tag。
-  log "[2/7] 用生产 Compose 的 build 段就地构建五个应用镜像"
-  control_compose build
-  worker_compose 0 build
+  # 记下五个镜像的 image ID 与创建时间：[4/7] 会要求 Compose 解析出的引用仍指向同一个
+  # ID。原来那条"镜像名对得上"的断言两边同源、恒真，验不出复用的是不是旧代码。
+  "${UV_RUN[@]}" python -m scripts.release_e2e_provenance \
+    --state-dir "$STATE_DIR" ${reused[@]+"${reused[@]}"}
 }
 
 prepare_environment() {
@@ -164,10 +176,7 @@ prepare_environment() {
     --source-url "$SOURCE_URL" \
     --source-ref "$(resolve_source_ref)" \
     --runner-env "$STATE_DIR.runner.env" \
-    --https-port "$HTTPS_PORT" \
-    --http-redirect-port "$HTTP_REDIRECT_PORT" \
-    --gateway-port "$GATEWAY_PORT" \
-    --workers "$WORKERS"
+    --workers "$WORKERS" ${PORT_OVERRIDES[@]+"${PORT_OVERRIDES[@]}"}
   mv "$STATE_DIR.runner.env" "$STATE_DIR/runner.env"
 }
 
@@ -196,7 +205,7 @@ start_git_source() {
 start_stack() {
   log "[4/7] 起生产 Gateway 画像并用安装 Key 注册 $WORKERS 个 Worker（含按 worker_id 重签客户端证书）"
   "${UV_RUN[@]}" python -m scripts.release_e2e_orchestrator \
-    --environment "$STATE_DIR/production.env" \
+    --environment "$ENVIRONMENT_FILE" \
     --state-dir "$STATE_DIR"
 }
 
@@ -208,11 +217,14 @@ verify_transport() {
   peer="$("${UV_RUN[@]}" python -c \
     'import json,sys; ids=json.load(open(sys.argv[1])); print(ids[1] if len(ids)>1 else "")' \
     "$STATE_DIR/worker-ids.json")"
+  # origin 与 Gateway 端口全部从 production.env 推导：本轮 Compose 发布的就是那三个
+  # 端口，脚本里再抄一份默认值，判据就会打在共享测试机上别人的 :443 / :80 上——那套
+  # 栈设的正是同一组安全头，"连通 + 头对"根本区分不出被验对象是谁。
   "${UV_RUN[@]}" python -m scripts.verify_release_transport \
+    --environment "$ENVIRONMENT_FILE" \
     --ca "$STATE_DIR/public-ca.crt" \
     --client-cert "$STATE_DIR/worker-tls/client.crt" \
     --client-key "$STATE_DIR/worker-tls/client.key" \
-    --gateway-port "$GATEWAY_PORT" \
     --worker-id "$(cat "$STATE_DIR/worker-id")" \
     --peer-worker-id "$peer"
 }
@@ -226,13 +238,13 @@ verify_tls_hot_reload() {
   gateway_container="$(control_compose ps -q gateway)"
   [ -n "$gateway_container" ] || { echo "找不到 gateway 容器，无法校验热更新" >&2; exit 1; }
   "${UV_RUN[@]}" python -m scripts.verify_gateway_tls_hot_reload \
+    --environment "$ENVIRONMENT_FILE" \
     --gateway-tls-dir "$STATE_DIR/gateway-tls" \
     --ca-cert "$STATE_DIR/public-ca.crt" \
     --ca-key "$STATE_DIR/ca.key" \
     --client-cert "$STATE_DIR/worker-tls/client.crt" \
     --client-key "$STATE_DIR/worker-tls/client.key" \
-    --gateway-container "$gateway_container" \
-    --gateway-port "$GATEWAY_PORT"
+    --gateway-container "$gateway_container"
 }
 
 run_e2e() {
@@ -250,6 +262,16 @@ run_e2e() {
   "${UV_RUN[@]}" pytest tests/e2e -q
 }
 
+# 复用镜像的那一轮与完整构建的那一轮，通过与否的含义不同，最后一行必须说清楚是哪一种：
+# 镜像与提交之间在不改 Dockerfile 的前提下没有可验证的绑定，所以复用轮次只能当调试用。
+report_verdict() {
+  if [ "${ANTCODE_GATEWAY_E2E_SKIP_BUILD:-0}" = "1" ]; then
+    log "调试轮次 7/7 通过：镜像未经本轮构建，**不构成发布门禁**；发布前请去掉 ANTCODE_GATEWAY_E2E_SKIP_BUILD 重跑"
+    return
+  fi
+  log "发布门禁 7/7 通过：五个应用镜像由本轮源码树构建，各步判据均打在本轮发布的端口上"
+}
+
 trap teardown EXIT
 preflight
 # 构建必须排在环境生成之后：compose build 要读 production.env 才能解析 ANTCODE_IMAGE_TAG
@@ -262,3 +284,4 @@ verify_transport
 verify_tls_hot_reload
 
 run_e2e
+report_verdict
