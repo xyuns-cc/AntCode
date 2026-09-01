@@ -23,6 +23,7 @@ from antcode_core.application.services.alert.alert_delivery_status import (
 )
 from antcode_core.application.services.alert.alert_manager import AlertManager
 from antcode_core.application.services.alert.alert_service import AlertService
+from antcode_core.common import config
 
 SUBSCRIBER_SETTLE_SECONDS = 0.05
 
@@ -132,6 +133,27 @@ async def test_published_invalidation_makes_subscriber_reload(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_invalidation_channel_follows_redis_namespace(monkeypatch) -> None:
+    """频道名必须跟随 REDIS_NAMESPACE。
+
+    共用一台 Redis 的两套部署正是靠 REDIS_NAMESPACE 隔离；写死 ``antcode:``
+    时 A 的一次配置写入会唤醒 B 的每个 uvicorn 进程去重载自己的库。
+    """
+    published: list[tuple[str, str]] = []
+
+    class _FakeRedis:
+        async def publish(self, channel, payload):
+            published.append((channel, payload))
+
+    monkeypatch.setattr(config.settings, "REDIS_NAMESPACE", "tenant-b")
+    monkeypatch.setattr(alert_config_broadcast, "get_redis_client", AsyncMock(return_value=_FakeRedis()))
+
+    await alert_config_broadcast.publish_alert_config_invalidation()
+
+    assert published[0][0] == "tenant-b:alert_config:invalidate"
+
+
+@pytest.mark.asyncio
 async def test_test_alert_rebuilds_channels_from_database(monkeypatch) -> None:
     """/alert/test 必须以 DB 为准重建渠道。
 
@@ -194,7 +216,7 @@ def test_every_send_alert_auto_outcome_carries_a_status() -> None:
     assert "status" in manager.send_alert_auto("m", "ERROR", ["ERROR"])
 
     manager._shutting_down = False
-    manager.add_channel(MagicMock(channel_name="feishu"))
+    manager.replace_channels([MagicMock(channel_name="feishu")])
     assert "status" in manager.send_alert_auto("m", "ERROR", ["ERROR"])  # 未就绪
 
     manager.configure_rate_limit(enabled=True, window=60, max_count=1)

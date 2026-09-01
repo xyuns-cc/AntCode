@@ -21,7 +21,6 @@ from antcode_core.application.services.alert.alert_rate_limiter import RateLimit
 class AlertManager:
     def __init__(self):
         self._channels = {}
-        self._enabled_channels = []
         self._rate_limiter = None
         self._rate_limit_enabled = False
         self._loop = None
@@ -67,25 +66,19 @@ class AlertManager:
         else:
             self._rate_limiter = None
 
-    def add_channel(self, channel, enabled=True):
-        channel_name = channel.channel_name
-        self._channels[channel_name] = channel
-        if enabled and channel_name not in self._enabled_channels:
-            self._enabled_channels.append(channel_name)
+    def replace_channels(self, channels):
+        """整体换入一份新拓扑。**必须是单次赋值**。
 
-    def remove_channel(self, channel_name):
-        if channel_name in self._channels:
-            del self._channels[channel_name]
-            if channel_name in self._enabled_channels:
-                self._enabled_channels.remove(channel_name)
+        重建配置的执行流与发送告警的执行流不是同一条（``configure_async`` 另起
+        线程跑本对象的事件循环），此前"逐个 remove 再逐个 add"中间那段空拓扑会
+        被发送侧读到：``send_alert_auto`` 判成 no_channels 丢弃告警，
+        ``_send_async`` 连日志都不留就 return。整体替换后读到的要么全是旧渠道、
+        要么全是新渠道。
 
-    def enable_channel(self, channel_name):
-        if channel_name in self._channels and channel_name not in self._enabled_channels:
-            self._enabled_channels.append(channel_name)
-
-    def disable_channel(self, channel_name):
-        if channel_name in self._enabled_channels:
-            self._enabled_channels.remove(channel_name)
+        读侧一律先把 ``self._channels`` 取到局部再用：赋值只换绑定、不改动已被
+        读走的那个 dict，因此不需要加锁。
+        """
+        self._channels = {channel.channel_name: channel for channel in channels}
 
     def send_alert_auto(self, message, level, default_levels, rate_key=None):
         """发送告警（自动触发）。
@@ -99,7 +92,7 @@ class AlertManager:
         if not self._check_rate_limit(message, level, rate_key):
             return undelivered(STATUS_RATE_LIMITED)
 
-        if not self._enabled_channels:
+        if not self._channels:
             # 这里曾经 `return {}`：一条真实告警被无声吞掉，调用方与运维都看不到。
             # 不抛异常是因为告警多在异常处理路径上触发，抛出会把主流程一起带走；
             # fail-closed 在这里的含义是"必须可观测"，而不是"打断业务"。
@@ -141,11 +134,8 @@ class AlertManager:
         """异步发送告警到所有渠道"""
         named_tasks = []
 
-        for channel_name in self._enabled_channels:
-            channel = self._channels.get(channel_name)
-            if not channel:
-                continue
-
+        # 先取到局部：重建随时可能换掉绑定，一轮发送必须跑在同一份拓扑上。
+        for channel_name, channel in self._channels.items():
             try:
                 if force:
                     task = channel.send_alert_force(message, level)
@@ -230,11 +220,15 @@ class AlertManager:
         except Exception as e:
             logger.error(f"关闭告警管理器异常: {e}")
 
+    # "已装配"与"已启用"是同一件事：装配侧只装有目标的渠道，单渠道内部的
+    # 启用/停用由 WebhookConfig.enabled 在渠道对象里判，manager 这一层的
+    # enable/disable 从来没有调用方。两个读法保留是因为 /alert/config 的响应
+    # 里两个字段都在用。
     def get_available_channels(self):
-        return list(self._channels.keys())
+        return list(self._channels)
 
     def get_enabled_channels(self):
-        return self._enabled_channels.copy()
+        return list(self._channels)
 
     def get_rate_limit_stats(self):
         if self._rate_limiter:

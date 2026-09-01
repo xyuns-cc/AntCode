@@ -17,9 +17,18 @@ from collections.abc import Awaitable, Callable
 
 from loguru import logger
 
-from antcode_core.infrastructure.redis import get_redis_client
+from antcode_core.infrastructure.redis import get_redis_client, redis_namespace
 
-ALERT_CONFIG_INVALIDATION_CHANNEL = "antcode:alert_config:invalidate"
+
+def alert_config_invalidation_channel() -> str:
+    """失效通道名，跟随 ``REDIS_NAMESPACE``。
+
+    共用一台 Redis 的多套部署正是靠 REDIS_NAMESPACE 隔离，而 pubsub 频道不分
+    库、全实例可见：写死 ``antcode:`` 时 A 的一次配置写入会唤醒 B 的每个进程去
+    重载它自己的库。拼接方式与 ``control_plane`` 的其余 key 一致，不另起一份。
+    """
+    return f"{redis_namespace()}:alert_config:invalidate"
+
 
 # redis-py 的 pubsub.listen() 会先吐 subscribe/unsubscribe 确认帧，只有这两类是数据
 _PAYLOAD_MESSAGE_TYPES = frozenset({"message", "pmessage"})
@@ -33,7 +42,7 @@ _subscriber_tasks: set[asyncio.Task] = set()
 async def publish_alert_config_invalidation() -> None:
     """通知其它进程重载告警配置。写入方（配置更新接口）调用。"""
     redis = await get_redis_client()
-    await redis.publish(ALERT_CONFIG_INVALIDATION_CHANNEL, "1")
+    await redis.publish(alert_config_invalidation_channel(), "1")
     logger.debug("已发布告警配置失效通知")
 
 
@@ -44,7 +53,7 @@ async def start_alert_config_subscriber(reload: ReloadCallback) -> None:
     """
     redis = await get_redis_client()
     pubsub = redis.pubsub()
-    await pubsub.subscribe(ALERT_CONFIG_INVALIDATION_CHANNEL)
+    await pubsub.subscribe(alert_config_invalidation_channel())
     task = asyncio.create_task(_consume(pubsub, reload))
     _subscriber_tasks.add(task)
     task.add_done_callback(_on_subscriber_exit)
@@ -69,7 +78,7 @@ def _on_subscriber_exit(task: asyncio.Task) -> None:
 
 
 __all__ = [
-    "ALERT_CONFIG_INVALIDATION_CHANNEL",
+    "alert_config_invalidation_channel",
     "publish_alert_config_invalidation",
     "start_alert_config_subscriber",
 ]
