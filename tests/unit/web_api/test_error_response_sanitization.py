@@ -3,6 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from antcode_core.application.services.workers.dispatch_error_codes import (
+    DISPATCH_NO_CAPACITY,
+    DISPATCH_QUEUE_WRITE_FAILED,
+)
 from antcode_core.application.services.workers.worker_dispatcher import (
     BatchDispatchResult,
     DispatchResult,
@@ -17,6 +21,7 @@ from fastapi import HTTPException, status
 from tortoise.exceptions import IntegrityError
 
 _INTERNAL_ERROR = "postgresql://internal-user:secret@db/private-table"
+_QUEUE_FAILURE = DISPATCH_QUEUE_WRITE_FAILED
 
 
 @pytest.mark.asyncio
@@ -134,7 +139,7 @@ async def test_dispatch_failure_hides_dispatcher_error(monkeypatch, active_sched
     monkeypatch.setattr(
         services_module.worker_task_dispatcher,
         "dispatch_task",
-        AsyncMock(return_value=DispatchResult(success=False, error=_INTERNAL_ERROR)),
+        AsyncMock(return_value=DispatchResult(success=False, error=_INTERNAL_ERROR, error_code=_QUEUE_FAILURE)),
     )
     request = workers.WorkerDispatchTaskRequest(project_id="project-1", task_id=5)
 
@@ -158,7 +163,7 @@ async def test_batch_dispatch_failure_hides_dispatcher_error(monkeypatch, active
     monkeypatch.setattr(
         services_module.worker_task_dispatcher,
         "dispatch_batch",
-        AsyncMock(return_value=BatchDispatchResult(success=False, error=_INTERNAL_ERROR)),
+        AsyncMock(return_value=BatchDispatchResult(success=False, error=_INTERNAL_ERROR, error_code=_QUEUE_FAILURE)),
     )
     request = workers.WorkerDispatchBatchRequest(tasks=[{"project_id": "project-1", "task_id": 5, "run_id": "run-1"}])
 
@@ -167,3 +172,31 @@ async def test_batch_dispatch_failure_hides_dispatcher_error(monkeypatch, active
 
     assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert exc_info.value.detail == "批量任务分发失败"
+
+
+@pytest.mark.asyncio
+async def test_batch_dispatch_capacity_failure_hides_dispatcher_error(monkeypatch, active_scheduler_authority) -> None:
+    """容量失败改回 503 之后，503 这条分支同样不许把 result.error 原文带出去。"""
+    services_module = importlib.import_module("antcode_core.application.services.workers")
+    guard_module = importlib.import_module("antcode_web_api.routes.v1.worker_dispatch_guard")
+    monkeypatch.setattr(workers, "_resolve_dispatch_worker", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        guard_module,
+        "authorize_batch_dispatch_tasks",
+        AsyncMock(return_value=[{"project_id": "project-1", "task_id": 5, "run_id": "run-1"}]),
+    )
+    monkeypatch.setattr(
+        services_module.worker_task_dispatcher,
+        "dispatch_batch",
+        AsyncMock(
+            return_value=BatchDispatchResult(success=False, error=_INTERNAL_ERROR, error_code=DISPATCH_NO_CAPACITY)
+        ),
+    )
+    request = workers.WorkerDispatchBatchRequest(tasks=[{"project_id": "project-1", "task_id": 5, "run_id": "run-1"}])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await workers.dispatch_batch_to_worker(request, SimpleNamespace(user_id=1))
+
+    assert exc_info.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert exc_info.value.detail == "暂无可用 Worker，请稍后重试"
+    assert _INTERNAL_ERROR not in exc_info.value.detail

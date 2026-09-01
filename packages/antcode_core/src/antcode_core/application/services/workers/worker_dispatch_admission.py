@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from antcode_core.application.services.workers.dispatch_error_codes import (
+    DISPATCH_NO_CAPACITY,
+    DISPATCH_WORKER_OFFLINE,
+)
 from antcode_core.application.services.workers.worker_capability_routing import capability_requirement_label
 from antcode_core.application.services.workers.worker_selection import select_dispatch_worker
 from antcode_core.domain.models import WorkerStatus
@@ -19,14 +23,15 @@ from antcode_core.domain.models import WorkerStatus
 
 @dataclass(frozen=True)
 class DispatchAdmission:
-    """准入结论。``worker`` 为空即被拒，此时 ``error`` 必须说明是哪一种容量不足。"""
+    """准入结论。``worker`` 为空即被拒，此时必须同时给出结构化码与人读原因。"""
 
     worker: Any | None
     error: str | None = None
+    error_code: str | None = None
 
     def __post_init__(self) -> None:
-        if self.worker is None and not self.error:
-            raise ValueError("准入被拒时必须给出原因")
+        if self.worker is None and not (self.error and self.error_code):
+            raise ValueError("准入被拒时必须给出 error_code 与原因")
 
 
 async def worker_heartbeat_is_fresh(worker: Any) -> bool:
@@ -70,9 +75,17 @@ async def admit_dispatch_worker(
         require_task_type=require_task_type,
     )
     if not worker:
-        return DispatchAdmission(worker=None, error=_no_worker_reason(require_task_type))
+        return DispatchAdmission(
+            worker=None,
+            error=_no_worker_reason(require_task_type),
+            error_code=DISPATCH_NO_CAPACITY,
+        )
     if not await worker_heartbeat_is_fresh(worker):
-        return DispatchAdmission(worker=None, error=f"Worker 未在线: {worker.name}")
+        return DispatchAdmission(
+            worker=None,
+            error=f"Worker 未在线: {worker.name}",
+            error_code=DISPATCH_WORKER_OFFLINE,
+        )
     return DispatchAdmission(worker=worker)
 
 

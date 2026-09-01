@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from loguru import logger
 
 from antcode_core.application.services.lease_capability_snapshot import LeaseCapabilitySnapshot
+from antcode_core.application.services.workers.dispatch_error_codes import (
+    DISPATCH_EMPTY_BATCH,
+    DISPATCH_QUEUE_WRITE_FAILED,
+    DISPATCH_SOURCE_SYNC_FAILED,
+)
 from antcode_core.application.services.workers.dispatch_source_bundle_plan import prepare_source_bundles
 from antcode_core.application.services.workers.dispatch_task_enrichment import (
     RUNTIME_ENV_KEY,
@@ -38,8 +43,12 @@ class DispatchResult:
     task_id: str | None = None
     message: str = ""
     error: str | None = None
+    error_code: str | None = None
     transfer_skipped: bool = False
     accepted_count: int = 0
+
+    def __post_init__(self) -> None:
+        _require_failure_code(self)
 
 
 @dataclass
@@ -56,7 +65,11 @@ class BatchDispatchResult:
     rejected_tasks: list[dict] = field(default_factory=list)
     message: str = ""
     error: str | None = None
+    error_code: str | None = None
     sync_results: dict | None = None
+
+    def __post_init__(self) -> None:
+        _require_failure_code(self)
 
 
 class WorkerTaskDispatcher:
@@ -128,7 +141,7 @@ class WorkerTaskDispatcher:
     ):
         """批量分发任务到节点（写入 Worker 的 ready stream）"""
         if not tasks:
-            return BatchDispatchResult(success=False, error="任务列表为空")
+            return BatchDispatchResult(success=False, error="任务列表为空", error_code=DISPATCH_EMPTY_BATCH)
 
         require_render = require_render or any(task.get("require_render") for task in tasks)
         require_task_type = required_execution_task_types(tasks)
@@ -142,7 +155,11 @@ class WorkerTaskDispatcher:
             require_task_type=require_task_type,
         )
         if admission.worker is None:
-            return BatchDispatchResult(success=False, error=admission.error)
+            return BatchDispatchResult(
+                success=False,
+                error=admission.error,
+                error_code=admission.error_code,
+            )
 
         try:
             return await self._publish_batch(
@@ -159,7 +176,12 @@ class WorkerTaskDispatcher:
         """准入之后的固定次序：备好代码 → 复核能力并绑定 run → 写队列。"""
         plan = await prepare_source_bundles(worker, tasks)
         if plan.failure_reason:
-            return BatchDispatchResult(success=False, error=plan.failure_reason, sync_results=plan.sync_results)
+            return BatchDispatchResult(
+                success=False,
+                error=plan.failure_reason,
+                error_code=DISPATCH_SOURCE_SYNC_FAILED,
+                sync_results=plan.sync_results,
+            )
 
         enriched_tasks = enrich_dispatch_tasks(tasks, plan.run_download_info)
         lease_snapshot = await self._revalidate_and_bind(
@@ -174,8 +196,9 @@ class WorkerTaskDispatcher:
             batch_id=batch_id or str(uuid.uuid4()),
             lease_snapshot=lease_snapshot,
         )
+        published = bool(result.get("success", False))
         return BatchDispatchResult(
-            success=result.get("success", False),
+            success=published,
             worker_id=worker.public_id,
             worker_name=worker.name,
             batch_id=result.get("batch_id"),
@@ -185,6 +208,7 @@ class WorkerTaskDispatcher:
             rejected_tasks=result.get("rejected_tasks", []),
             message=result.get("message", "批量任务已分发"),
             error=result.get("error"),
+            error_code=None if published else DISPATCH_QUEUE_WRITE_FAILED,
             sync_results=plan.sync_results,
         )
 
@@ -241,9 +265,16 @@ def _failed_single_dispatch(result: BatchDispatchResult) -> DispatchResult:
     return DispatchResult(
         success=False,
         error=error_msg or "任务分发失败，未知原因",
+        error_code=result.error_code,
         worker_id=result.worker_id,
         worker_name=result.worker_name,
     )
+
+
+def _require_failure_code(result: "DispatchResult | BatchDispatchResult") -> None:
+    """无码的失败会在 HTTP 边界退化成 500，"稍后重试"与"我们坏了"就又混成同一种。"""
+    if not result.success and not result.error_code:
+        raise ValueError("分发失败结果必须带结构化 error_code")
 
 
 worker_task_dispatcher = WorkerTaskDispatcher()

@@ -34,6 +34,7 @@ from antcode_web_api.routes.v1.workers_dispatch_models import (
     WorkerDispatchTaskRequest,
 )
 from antcode_web_api.routes.v1.workers_dispatch_run_state import (
+    dispatch_failure_response,
     fail_task_dispatch,
     finalize_failed_dispatch_run,
     mark_run_dispatched,
@@ -187,7 +188,7 @@ async def dispatch_task_to_worker(
         raise
 
     if not result.success:
-        await fail_task_dispatch(task_run, run_id, result.error)
+        await fail_task_dispatch(task_run, run_id, result.error, error_code=result.error_code)
 
     await mark_run_dispatched(run_id, result.worker_id)
     return success(asdict(result), message="任务已分发到 Worker")
@@ -212,21 +213,19 @@ async def dispatch_batch_to_worker(
         project_service,
     )
 
+    batch_id = request.get("batch_id")
     async with http_fenced_dispatch_epoch():
         result = await worker_task_dispatcher.dispatch_batch(
             tasks=tasks,
             worker_id=dispatch_worker_id,
             region=request.get("region"),
             tags=request.get("tags"),
-            batch_id=request.get("batch_id"),
+            batch_id=batch_id,
             require_render=request.get("require_render", False),
         )
     if not result.success:
-        logger.error("批量任务分发失败: batch_id={} error={}", request.get("batch_id"), result.error)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="批量任务分发失败",
-        )
+        logger.error("批量任务分发失败: batch_id={} code={} error={}", batch_id, result.error_code, result.error)
+        raise dispatch_failure_response(result.error_code, detail="批量任务分发失败")
 
     return success(asdict(result), message="批量任务已分发到 Worker")
 
