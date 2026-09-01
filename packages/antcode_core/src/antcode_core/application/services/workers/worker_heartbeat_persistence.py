@@ -12,6 +12,7 @@ from tortoise.transactions import in_transaction
 from antcode_core.application.services.workers.worker_registration_gate import (
     has_unacknowledged_v2_registration,
 )
+from antcode_core.application.services.workers.worker_resource_probe import persisted_worker_metrics
 from antcode_core.domain.models import Worker, WorkerHeartbeat, WorkerStatus
 
 
@@ -154,7 +155,12 @@ def _apply_update(
         worker.status = update.status
         update_fields.append("status")
     if update.metrics:
-        worker.metrics = {**(worker.metrics or {}), **update.metrics}
+        # 打底的旧值必须过 ``persisted_worker_metrics`` 的契约检查，否则坏列在这里是死结：
+        # ``{**(worker.metrics)}`` 对非 Mapping 一律抛 TypeError，而这条心跳正是唯一会重写
+        # 这一列的写入方——它一抛，坏值就再也没人覆盖得掉，那台 Worker 的 last_heartbeat
+        # 从此不再前进。契约检查把坏列降级成"没有落库指标"，本次心跳照常写下一个干净的
+        # JSON 对象，列自己就好了；坏成什么样由那个函数点名到机器和实际类型。
+        worker.metrics = {**(persisted_worker_metrics(worker) or {}), **update.metrics}
         update_fields.append("metrics")
     for field_name, value in update.system_info.items():
         setattr(worker, field_name, value)
