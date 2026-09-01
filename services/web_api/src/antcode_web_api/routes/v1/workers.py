@@ -384,22 +384,8 @@ async def refresh_worker_status(worker_id, current_user=None):
 # ====== Worker 权限管理 API（需要管理员权限）======
 
 
-async def get_my_available_workers(current_user):
-    return await _workers_permission.get_my_available_workers(current_user, _worker_to_response)
-
-
 async def get_worker_users(worker_id: str, current_user):
     return await _workers_permission.get_worker_users(worker_id, current_user)
-
-
-async def assign_worker_permission(
-    worker_id: str, request: _workers_permission.WorkerPermissionAssignRequest, current_user
-):
-    return await _workers_permission.assign_worker_permission(worker_id, request, current_user)
-
-
-async def revoke_worker_permission(worker_id: str, user_id: str, current_user):
-    return await _workers_permission.revoke_worker_permission(worker_id, user_id, current_user)
 
 
 async def batch_assign_workers(request: _workers_permission.WorkerPermissionBatchAssignRequest, current_user):
@@ -407,12 +393,6 @@ async def batch_assign_workers(request: _workers_permission.WorkerPermissionBatc
 
 
 # ====== Worker 端调用的 API（无需用户认证）======
-
-
-async def get_worker_metrics_history(worker_id: str, hours: int = 24, current_user=None):
-    return await _workers_stats.get_worker_metrics_history(
-        worker_id, hours, current_user, require_worker_access=_require_worker_access
-    )
 
 
 # P2 拆分: register_direct_worker 移至 workers_register.py; 顶层 shim 保留原名。
@@ -500,28 +480,6 @@ async def cancel_worker_queued_task(worker_id, task_id, current_user=None):
 # P2 拆分: distributed task status/logs 3 个 handler 移至 workers_distributed.py,
 # 通过 register_distributed_routes 挂 @router 装饰(见文件末尾)。
 # workers_route.get_distributed_task_status 等测试引用通过下面 shim 保留。
-async def get_distributed_task_status(worker_id: str, task_id: str, current_user):
-    return await _workers_distributed.get_distributed_task_status(
-        worker_id,
-        task_id,
-        current_user,
-        require_worker_access=_require_worker_access,
-        require_run_access=_require_run_access,
-    )
-
-
-async def get_distributed_task_logs(
-    worker_id: str, task_id: str, log_type: str = "output", tail: int = 100, current_user=None
-):
-    return await _workers_distributed.get_distributed_task_logs(
-        worker_id,
-        task_id,
-        log_type,
-        tail=tail,
-        current_user=current_user,
-        require_worker_access=_require_worker_access,
-        require_run_access=_require_run_access,
-    )
 
 
 # P2 拆分: 4 个 Worker 上报接口注册委托给 workers_report.register_report_routes,

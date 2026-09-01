@@ -277,25 +277,6 @@ async def list_task_runs(
     )
 
 
-async def get_task_schedule_history(
-    task_id: str,
-    *,
-    page: int = 1,
-    size: int = 20,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    current_user=None,
-):
-    return await _tasks_query.get_task_schedule_history(
-        task_id,
-        page=page,
-        size=size,
-        start_date=start_date,
-        end_date=end_date,
-        current_user=current_user,
-    )
-
-
 async def get_task_stats(task_id, current_user=None):
     return await _tasks_query.get_task_stats(task_id, current_user)
 
@@ -313,22 +294,10 @@ _task_stats_payload = _tasks_query._task_stats_payload
 
 # P2 拆分: 7 个 handler + 3 helper 移至 tasks_transfer.py; 顶层 shim 保留原名
 # 让 tests 直接引用 tasks.export_task_config / tasks.get_task_dependencies 等继续可命中。
-async def validate_cron_expression(request, current_user=None):
-    return await _tasks_transfer.validate_cron_expression(request, current_user)
 
 
 async def list_task_templates(current_user=None):
     return await _tasks_transfer.list_task_templates(current_user)
-
-
-async def create_task_from_template(template_id: str, request: dict, current_user=None):
-    return await _tasks_transfer.create_task_from_template(
-        template_id,
-        request,
-        current_user,
-        create_task_response=create_task_response,
-        ensure_specified_worker_access=_ensure_specified_worker_access,
-    )
 
 
 async def export_task_config(task_id: str, format: str = "json", current_user=None, *, http_request):
@@ -352,22 +321,7 @@ async def import_task_config(file, project_id: str | None = None, current_user=N
     )
 
 
-async def get_task_dependencies(task_id: str, current_user=None):
-    return await _tasks_transfer.get_task_dependencies(task_id, current_user)
-
-
-async def update_task_dependencies(task_id: str, request, current_user=None):
-    return await _tasks_transfer.update_task_dependencies(task_id, request, current_user)
-
-
 # 私有 helper module-alias
-async def _read_task_import(file):
-    return await _tasks_transfer._read_task_import(
-        file,
-        max_import_bytes=MAX_TASK_IMPORT_BYTES,
-        parse_task_import_payload=_parse_task_import_payload,
-        decode_task_import_bytes=_decode_task_import_bytes,
-    )
 
 
 _validate_task_dependencies = _tasks_transfer._validate_task_dependencies
@@ -508,16 +462,8 @@ async def get_task_execution_logs(run_id: str, page: int = 1, size: int = 200, c
     return await _tasks_runs.get_task_execution_logs(run_id, page=page, size=size, current_user=current_user)
 
 
-async def download_task_execution_logs(run_id: str, format: str = "txt", current_user=None):
-    return await _tasks_runs.download_task_execution_logs(run_id, format, current_user)
-
-
 async def _get_stoppable_execution(run_id: str, user_id: int):
     return await _tasks_runs._get_stoppable_execution(run_id, user_id)
-
-
-def _stop_task_response(run_id: str, *, remote_cancelled: bool):
-    return _tasks_runs._stop_task_response(run_id, remote_cancelled=remote_cancelled)
 
 
 async def _try_send_stop_event_with_reason(execution, user_id: int):
@@ -526,6 +472,12 @@ async def _try_send_stop_event_with_reason(execution, user_id: int):
 
 async def _raise_if_stop_terminal_conflict(run_id: str, user_id: int) -> None:
     await _tasks_runs._raise_if_stop_terminal_conflict(run_id, user_id)
+
+
+# 不是"纯转发壳"：tasks_runs._perform_task_stop 走 ``tm._stop_task_response``
+# 动态属性查找（tm 即本模块），删掉会 AttributeError。名字级 grep 看不到这条边。
+def _stop_task_response(run_id: str, *, remote_cancelled: bool):
+    return _tasks_runs._stop_task_response(run_id, remote_cancelled=remote_cancelled)
 
 
 # P2 拆分: 5 个执行控制 handler 挂路由 (pause/resume/trigger/execute/toggle)
