@@ -312,11 +312,6 @@ class WorkerConfig:
     # 传输模式配置
     transport_mode: str = "gateway"  # 传输模式: "direct" 或 "gateway"
 
-    # T6-T4a: RulePlugin 开关。默认开（当前主用途是爬虫）；code-only worker
-    # 部署时可关掉减少 Scrapy 依赖启动开销。也可通过 env
-    # `WORKER_ENABLE_RULE_PLUGIN=false` 覆盖。
-    enable_rule_plugin: bool = True
-
     # Redis 配置（Direct 模式）
     redis_url: str = ""
     redis_namespace: str = "antcode"

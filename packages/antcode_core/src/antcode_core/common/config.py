@@ -193,17 +193,6 @@ class Settings(BaseSettings):
 
     # === 文件配置 ===
     MAX_FILE_SIZE: int = 100 * 1024 * 1024
-    MAX_FILE_EDIT_SIZE: int = 1 * 1024 * 1024
-    ALLOWED_FILE_TYPES: list[str] = [
-        ".zip",
-        ".tar.gz",
-        ".py",
-        ".txt",
-        ".json",
-        ".md",
-        ".yml",
-        ".yaml",
-    ]
 
     # === Master URL 配置 ===
     GATEWAY_HOST: str = Field(default="localhost")
@@ -231,14 +220,6 @@ class Settings(BaseSettings):
     CRAWL_BACKEND: str = Field(default="redis")
 
     # === 日志双通道传输配置 ===
-    LOG_CHUNK_SIZE: int = Field(default=131072)
-    LOG_CHUNK_INTERVAL: float = Field(default=1.0)
-    LOG_MAX_IN_FLIGHT: int = Field(default=8)
-    LOG_ACK_TIMEOUT: float = Field(default=5.0)
-    LOG_RETRY_BASE: float = Field(default=0.5)
-    LOG_RETRY_MAX_DELAY: float = Field(default=5.0)
-    LOG_RETRY_MAX: int = Field(default=5)
-    LOG_WORKER_MAX_RATE: int = Field(default=800 * 1024)
     LOG_STREAM_MAXLEN: int = Field(default=10000)
     LOG_STREAM_TTL_SECONDS: int = Field(default=7 * 86400)
     LOG_CHUNK_STREAM_MAXLEN: int = Field(default=2000)
