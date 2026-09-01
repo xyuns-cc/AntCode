@@ -70,14 +70,7 @@ async def test_environment_rejects_short_inline_jwt_secret(monkeypatch) -> None:
     assert exc_info.value.code == 1
 
 
-def test_legacy_worker_upgrade_includes_previous_key_expiry() -> None:
-    columns = {column: ddl for column, ddl in init_db.WORKERS_LEGACY_COLUMNS}
-
-    assert "api_key_previous_expires_at" in columns
-    assert "TIMESTAMPTZ NULL" in columns["api_key_previous_expires_at"]
-
-
-def test_legacy_worker_upgrade_and_schema_contract_include_redis_acl_columns() -> None:
+def test_schema_contract_includes_redis_acl_columns() -> None:
     from scripts.init_db_schema_contracts import COLUMN_CONTRACTS
 
     expected = {
@@ -86,57 +79,18 @@ def test_legacy_worker_upgrade_and_schema_contract_include_redis_acl_columns() -
         "redis_acl_revision",
         "redis_acl_synced_at",
     }
-    legacy_columns = {name for name, _ddl in init_db.WORKERS_LEGACY_COLUMNS}
     contract_columns = {item.name for item in COLUMN_CONTRACTS if item.table == "workers"}
-    assert expected.issubset(legacy_columns)
     assert expected.issubset(contract_columns)
 
 
-def test_legacy_upgrade_includes_cancel_columns_and_required_indexes() -> None:
-    columns = {(table, column): ddl for table, column, ddl in init_db.NEW_FEATURE_COLUMNS}
+def test_required_indexes_are_created_concurrently() -> None:
     indexes = dict(init_db.PERFORMANCE_INDEXES)
 
-    assert "TIMESTAMPTZ NULL" in columns[("task_executions", "cancel_requested_at")]
-    assert "BIGINT NULL" in columns[("task_executions", "cancel_requested_by")]
     assert "CONCURRENTLY" in indexes["idx_task_executions_cancel_requested_at"]
     assert "UNIQUE INDEX CONCURRENTLY" in indexes["idx_worker_install_keys_registration_id_unique"]
-    assert "VARCHAR(50) NULL" in columns[("project_rules", "region")]
-    assert "BOOLEAN NOT NULL DEFAULT FALSE" in columns[("project_rules", "require_render")]
     assert "CONCURRENTLY" in indexes["idx_project_rules_region"]
     assert "CONCURRENTLY" in indexes["idx_scheduled_tasks_project_id"]
-
-
-def test_standard_init_removes_legacy_project_source_uniqueness() -> None:
-    source = Path("scripts/init_db_legacy_schema.py").read_text(encoding="utf-8")
-
-    assert "await _allow_shared_project_sources(connection)" in source
-    assert "DROP CONSTRAINT" in source
-    assert "DROP INDEX CONCURRENTLY" in source
-    contracts = {contract.name: contract for contract in INDEX_CONTRACTS}
-    assert contracts["idx_project_sources_repository_subdir"].keys == ("repository_id", "subdir")
-    indexes = dict(init_db.PERFORMANCE_INDEXES)
     assert "CONCURRENTLY" in indexes["idx_project_sources_repository_subdir"]
-
-
-@pytest.mark.asyncio
-async def test_standard_init_drops_exact_standalone_project_source_unique_index() -> None:
-    from scripts.init_db_legacy_schema import _allow_shared_project_sources
-
-    connection = AsyncMock()
-    connection.execute_query_dict.side_effect = [
-        [],
-        [{"index_name": "idx_project_sources_repository_subdir"}],
-    ]
-
-    await _allow_shared_project_sources(connection)
-
-    catalog_query = connection.execute_query_dict.await_args_list[1].args[0]
-    assert "index_row.indisvalid" in catalog_query
-    assert "index_row.indisready" in catalog_query
-    assert "access_method.amname = 'btree'" in catalog_query
-    assert connection.execute_query.await_args.args[0] == (
-        'DROP INDEX CONCURRENTLY IF EXISTS public."idx_project_sources_repository_subdir"'
-    )
 
 
 def test_standard_init_includes_sensitive_data_migration() -> None:
@@ -165,7 +119,6 @@ async def test_standard_init_runs_worker_credential_migration_in_upgrade_order(m
     monkeypatch.setattr(init_db, "_check_env", step("environment"))
     for name in (
         "_generate_schemas",
-        "_upgrade_legacy_schema",
         "_align_database_integrity",
         "_check_required_tables",
         "_create_performance_indexes",
@@ -183,7 +136,6 @@ async def test_standard_init_runs_worker_credential_migration_in_upgrade_order(m
     assert events == [
         "environment",
         "_generate_schemas",
-        "_upgrade_legacy_schema",
         "_align_database_integrity",
         "worker_credentials",
         "sensitive_data",

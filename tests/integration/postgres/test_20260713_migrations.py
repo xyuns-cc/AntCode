@@ -73,7 +73,6 @@ async def test_fresh_database_init_creates_current_schema(pg_connection, monkeyp
 
     tortoise_module._cached_config.cache_clear()
     await init_db_script._generate_schemas()
-    await init_db_script._upgrade_legacy_schema()
     await init_db_script._align_database_integrity()
     await init_db_script._create_performance_indexes()
     await init_db_script._validate_schema_contracts()

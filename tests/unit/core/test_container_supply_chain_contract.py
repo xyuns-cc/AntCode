@@ -115,7 +115,6 @@ def test_web_api_image_contains_database_initializer():
         "scripts/init_db_current_schema.py",
         "scripts/init_db_environment.py",
         "scripts/init_db_indexes.py",
-        "scripts/init_db_legacy_schema.py",
         "scripts/init_db_schema_contracts.py",
         "scripts/init_db_schema_upgrades.py",
         "scripts/init_db_schema_validation.py",

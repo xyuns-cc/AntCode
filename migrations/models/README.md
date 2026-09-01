@@ -20,7 +20,7 @@ apply 者是 `tests/integration/postgres/migration_support.py`（测试用）。
 | 变更类型 | 谁负责 | 存量库要人工跑吗 |
 |---|---|---|
 | 新增表 | `Tortoise.generate_schemas(safe=True)` | 否 |
-| 新增列 | `init_db_legacy_schema.py` / `init_db_current_schema.py` 的 `ADD COLUMN IF NOT EXISTS` | 否 |
+| 新增列 | `init_db_current_schema.py` 的 `ADD COLUMN IF NOT EXISTS` | 否 |
 | 新增索引 | `init_db_indexes.py` + model `Meta.indexes` | 否 |
 | 外键 / 列类型加宽 / 去重索引 | `init_db_schema_upgrades.py::align_database_integrity` | 否 |
 | 凭据与敏感字段迁移 | `migrate_worker_credentials.py` / `encrypt_sensitive_data.py`（有 `antcode_data_migrations` 账本） | 否 |

@@ -1,4 +1,4 @@
-"""Database initialization and idempotent legacy-schema upgrade entry point."""
+"""Database initialization entry point."""
 
 from __future__ import annotations
 
@@ -23,11 +23,6 @@ from scripts.init_db_indexes import (  # noqa: E402, F401
     _drop_invalid_index,
     _index_is_valid,
     create_performance_indexes,
-)
-from scripts.init_db_legacy_schema import (  # noqa: E402, F401
-    NEW_FEATURE_COLUMNS,
-    WORKERS_LEGACY_COLUMNS,
-    upgrade_legacy_schema,
 )
 from scripts.init_db_schema_upgrades import align_database_integrity  # noqa: E402
 from scripts.init_db_schema_validation import validate_current_schema  # noqa: E402
@@ -106,11 +101,6 @@ async def _generate_schemas() -> None:
         logger.info("生成 schema (model -> PG)...")
         await Tortoise.generate_schemas(safe=True)
     logger.info("schema 已就位（safe=True，只补缺失的表）")
-
-
-async def _upgrade_legacy_schema() -> None:
-    async with _database_connection() as connection:
-        await upgrade_legacy_schema(connection)
 
 
 async def _align_database_integrity() -> None:
@@ -192,7 +182,6 @@ async def main() -> None:
     logger.info("=== AntCode 数据库初始化 ===")
     logger.info("目标 DB: {}", os.environ["DATABASE_URL"].split("@")[-1])
     await _generate_schemas()
-    await _upgrade_legacy_schema()
     await _align_database_integrity()
     await _migrate_worker_credentials()
     from scripts.encrypt_sensitive_data import main as encrypt_sensitive_data
