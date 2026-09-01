@@ -461,19 +461,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 544
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
-      "function": "RetryConfig.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 8
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
-      "function": "RetryService.schedule_retry",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
+      "value": 338
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
@@ -1007,25 +995,13 @@
       "path": "services/master/src/antcode_master/control/retry_loop.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 689
-    },
-    {
-      "path": "services/master/src/antcode_master/control/retry_loop.py",
-      "function": "RetryConfig.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 8
+      "value": 445
     },
     {
       "path": "services/master/src/antcode_master/control/retry_loop.py",
       "function": "RetryService._run_loop",
       "rule": "C901",
       "value": 11
-    },
-    {
-      "path": "services/master/src/antcode_master/control/retry_loop.py",
-      "function": "RetryService.schedule_retry",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
     },
     {
       "path": "services/master/src/antcode_master/control/retry_loop.py",

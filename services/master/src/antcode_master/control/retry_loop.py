@@ -17,13 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import UTC, datetime, timedelta
-from enum import StrEnum
+from datetime import datetime
 from typing import Any
 
 from antcode_core.common.config import settings
-from antcode_core.common.error_messages import normalize_persisted_error_message
-from antcode_core.domain.models.enums import TaskStatus
 from antcode_core.domain.models.task_run import TaskRun
 from loguru import logger
 from redis.exceptions import NoScriptError
@@ -34,54 +31,6 @@ from antcode_master.control.retry_intent_guard import (
     RetryIntentInvalidError,
     RetryTargetInvalidError,
 )
-
-
-class RetryStrategy(StrEnum):
-    """重试策略"""
-
-    FIXED = "fixed"
-    EXPONENTIAL = "exponential"
-    LINEAR = "linear"
-    CUSTOM = "custom"
-
-
-class CompensationType(StrEnum):
-    """补偿类型"""
-
-    ROLLBACK = "rollback"
-    CLEANUP = "cleanup"
-    NOTIFY = "notify"
-    RETRY_LATER = "retry_later"
-    SKIP = "skip"
-
-
-class RetryConfig:
-    """重试配置"""
-
-    def __init__(
-        self,
-        max_retries=3,
-        strategy=RetryStrategy.EXPONENTIAL,
-        base_delay=60,
-        max_delay=3600,
-        multiplier=2.0,
-        jitter=True,
-        retryable_errors=None,
-        non_retryable_errors=None,
-    ):
-        self.max_retries = max_retries
-        self.strategy = strategy
-        self.base_delay = base_delay
-        self.max_delay = max_delay
-        self.multiplier = multiplier
-        self.jitter = jitter
-        self.retryable_errors = retryable_errors or []
-        self.non_retryable_errors = non_retryable_errors or [
-            "AuthenticationError",
-            "PermissionDenied",
-            "InvalidConfiguration",
-        ]
-
 
 INFRASTRUCTURE_REQUEUE_DELAY_SECONDS = 5
 
@@ -257,22 +206,12 @@ class _RetryQueueBackend:
         redis = await self._get_redis()
         await redis.hdel(self.attempts_key(), run_id)
 
-    async def requeue(
-        self,
-        raw_payload: str,
-        *,
-        delay_seconds: int = 0,
-        replacement: str | None = None,
-    ) -> None:
-        """把 processing 中的条目放回 pending。
-
-        G3: ``replacement`` 非 None 时用新 payload 入队(用于附带 attempts
-        计数),processing hash 仍按原 raw_payload 清理。
-        """
+    async def requeue(self, raw_payload: str, *, delay_seconds: int = 0) -> None:
+        """把 processing 中的条目放回 pending。"""
         redis = await self._get_redis()
         score = int((time.time() + max(0, delay_seconds)) * 1000)
         pipe = redis.pipeline(transaction=True)
-        pipe.zadd(self.pending_key(), {(replacement if replacement is not None else raw_payload): score})
+        pipe.zadd(self.pending_key(), {raw_payload: score})
         pipe.hdel(self.processing_key(), raw_payload)
         results = await pipe.execute()
         if len(results) < 2 or int(results[1] or 0) != 1:
@@ -305,18 +244,6 @@ class _RetryQueueBackend:
             logger.warning(f"retry sweep: 从 processing hash 恢复 {requeued} 条崩溃遗留任务")
         return requeued
 
-    async def peek_all(self) -> list[dict[str, Any]]:
-        redis = await self._get_redis()
-        raw_members = await redis.zrange(self.pending_key(), 0, -1, withscores=True)
-        out: list[dict[str, Any]] = []
-        for raw, score in raw_members or []:
-            item = self._decode(raw)
-            if item is None:
-                continue
-            item["_score_ms"] = int(score)
-            out.append(item)
-        return out
-
     async def cancel_task(self, task_id: int) -> int:
         """Remove pending entries for a deleted task; in-flight claims self-fence on PostgreSQL."""
         redis = await self._get_redis()
@@ -345,8 +272,6 @@ class RetryService:
     """任务重试服务"""
 
     def __init__(self):
-        self.default_config = RetryConfig()
-        self.compensation_handlers = {}
         self._backend = _RetryQueueBackend()
         self._running = False
         self._worker_task: asyncio.Task | None = None
@@ -380,136 +305,6 @@ class RetryService:
                 pass
             self._worker_task = None
         logger.info("任务重试服务已停止")
-
-    def calculate_delay(self, retry_count, config=None):
-        """计算重试延迟时间"""
-        config = config or self.default_config
-
-        if config.strategy == RetryStrategy.FIXED:
-            delay = config.base_delay
-        elif config.strategy == RetryStrategy.EXPONENTIAL:
-            delay = config.base_delay * (config.multiplier**retry_count)
-        elif config.strategy == RetryStrategy.LINEAR:
-            delay = config.base_delay * (retry_count + 1)
-        else:
-            delay = config.base_delay
-
-        delay = min(delay, config.max_delay)
-
-        if config.jitter:
-            import random
-
-            jitter_range = delay * 0.1
-            delay = delay + random.uniform(-jitter_range, jitter_range)
-
-        return int(delay)
-
-    def should_retry(self, error, retry_count, config=None):
-        """判断是否应该重试"""
-        config = config or self.default_config
-
-        if retry_count >= config.max_retries:
-            return False
-
-        for non_retryable in config.non_retryable_errors:
-            if non_retryable.lower() in error.lower():
-                return False
-
-        if config.retryable_errors:
-            return any(retryable.lower() in error.lower() for retryable in config.retryable_errors)
-
-        return True
-
-    async def schedule_retry(self, task, execution, error, config=None):
-        """调度任务重试"""
-        config = config or self._get_task_retry_config(task)
-        current_retry = execution.retry_count
-
-        if not self.should_retry(error, current_retry, config):
-            logger.info(f"任务 {task.name} 不满足重试条件，执行补偿操作")
-            await self._execute_compensation(task, execution, error)
-            return None
-
-        delay = self.calculate_delay(current_retry, config)
-        next_retry_time = datetime.now(UTC) + timedelta(seconds=delay)
-
-        execution.retry_count = current_retry + 1
-        execution.status = TaskStatus.PENDING
-        execution.error_message = normalize_persisted_error_message(
-            f"重试 {execution.retry_count}/{config.max_retries}: {error}"
-        )
-        await execution.save()
-
-        task.failure_count += 1
-        await task.save()
-
-        await self._backend.schedule(
-            task_id=task.id,
-            run_id=execution.run_id,
-            retry_time=next_retry_time,
-            retry_count=execution.retry_count,
-        )
-
-        logger.info(
-            f"任务 {task.name} 已调度重试 "
-            f"({execution.retry_count}/{config.max_retries})，"
-            f"延迟 {delay} 秒，下次执行时间: {next_retry_time}"
-        )
-
-        return next_retry_time
-
-    def register_compensation_handler(self, task_type, handler):
-        """注册补偿处理器"""
-        self.compensation_handlers[task_type] = handler
-        logger.info(f"已注册补偿处理器: {task_type}")
-
-    async def _execute_compensation(self, task, execution, error):
-        """执行补偿操作"""
-        try:
-            task.status = TaskStatus.FAILED
-            task.failure_count += 1
-            await task.save()
-
-            execution.status = TaskStatus.FAILED
-            execution.end_time = datetime.now(UTC)
-            execution.error_message = normalize_persisted_error_message(f"重试耗尽: {error}")
-            await execution.save()
-
-            task_type = str(task.task_type.value) if task.task_type else "default"
-            handler = self.compensation_handlers.get(task_type)
-
-            if handler:
-                await handler(task, execution, error)
-                logger.info(f"任务 {task.name} 补偿处理完成")
-
-            await self._send_failure_alert(task, execution, error)
-
-        except Exception as e:
-            logger.error(f"执行补偿操作失败: {e}")
-
-    async def _send_failure_alert(self, task, execution, error):
-        """发送任务失败告警"""
-        try:
-            from antcode_core.application.services.alert import alert_service
-
-            alert_message = (
-                f"任务执行失败告警\n"
-                f"任务名称: {task.name}\n"
-                f"执行ID: {execution.run_id}\n"
-                f"重试次数: {execution.retry_count}\n"
-                f"错误信息: {error}\n"
-                f"失败时间: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-
-            await alert_service.send_alert(
-                alert_message,
-                level="ERROR",
-                source="scheduler",
-                extra={"title": f"任务失败: {task.name}"},
-            )
-
-        except Exception as e:
-            logger.error(f"发送任务失败告警失败: {e}")
 
     async def _run_loop(self):
         """从 Redis ZSet 原子 claim 到期任务并 trigger。
@@ -645,45 +440,6 @@ class RetryService:
     async def _recover_from_db(self) -> int:
         """Rebuild every durable intent using stable keyset pagination."""
         return await recover_retry_intents(self._backend)
-
-    def _get_task_retry_config(self, task):
-        """获取任务的重试配置"""
-        return RetryConfig(
-            max_retries=task.retry_count,
-            base_delay=task.retry_delay,
-            strategy=RetryStrategy.EXPONENTIAL,
-        )
-
-    async def get_retry_stats(self, task_id):
-        """获取任务重试统计"""
-        executions = await TaskRun.filter(task_id=task_id).all()
-
-        total_executions = len(executions)
-        retried_executions = sum(1 for e in executions if e.retry_count > 0)
-        total_retries = sum(e.retry_count for e in executions)
-
-        retry_success = sum(1 for e in executions if e.retry_count > 0 and e.status == TaskStatus.SUCCESS)
-        retry_success_rate = retry_success / retried_executions * 100 if retried_executions > 0 else 0
-
-        return {
-            "task_id": task_id,
-            "total_executions": total_executions,
-            "retried_executions": retried_executions,
-            "total_retries": total_retries,
-            "retry_success_count": retry_success,
-            "retry_success_rate": round(retry_success_rate, 2),
-            "avg_retries_per_execution": (
-                round(total_retries / retried_executions, 2) if retried_executions > 0 else 0
-            ),
-        }
-
-    async def get_pending_retries(self):
-        """从 PostgreSQL 权威 durable intent 获取待重试列表。"""
-        from antcode_core.application.services.scheduler.retry_pending_query import (
-            list_durable_pending_retries,
-        )
-
-        return await list_durable_pending_retries()
 
 
 retry_service = RetryService()
