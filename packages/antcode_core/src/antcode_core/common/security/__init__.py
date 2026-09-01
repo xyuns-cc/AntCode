@@ -4,7 +4,6 @@ Security 模块
 安全相关功能：
 - auth: JWT 令牌处理与 FastAPI 鉴权依赖
 - api_key: API Key 认证
-- mtls: mTLS 认证
 - permissions: 权限管理
 - hmac_utils: HMAC 签名工具
 """

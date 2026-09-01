@@ -338,24 +338,6 @@
       "value": 5
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_performance_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 349
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_performance_service.py",
-      "function": "LogPerformanceMonitor.record_metric",
-      "rule": "PLR2004",
-      "value": 2
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_performance_service.py",
-      "function": "LogPerformanceMonitor.record_metric",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/logs/log_security_service.py",
       "function": "LogSecurityService._find_execution",
       "rule": "PLR2004",
@@ -728,12 +710,6 @@
       "value": 13
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_project_service.py",
-      "function": "WorkerProjectService.record_project_sync",
-      "rule": "POSITIONAL_ARGS",
-      "value": 8
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_service.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -764,16 +740,10 @@
       "value": 2
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/common/command_runner.py",
-      "function": "run_command",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/common/config.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 408
+      "value": 389
     },
     {
       "path": "packages/antcode_core/src/antcode_core/common/security/auth.py",
@@ -802,24 +772,6 @@
     {
       "path": "packages/antcode_core/src/antcode_core/common/security/auth.py",
       "function": "record_refresh_session",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/common/security/mtls.py",
-      "function": "_flatten_certificate_name",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/common/security/mtls.py",
-      "function": "create_client_ssl_context",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/common/security/mtls.py",
-      "function": "create_ssl_context",
       "rule": "POSITIONAL_ARGS",
       "value": 4
     },
@@ -858,24 +810,6 @@
       "function": "fast_response",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/common/utils/verify_system_config.py",
-      "function": "verify_config",
-      "rule": "C901",
-      "value": 17
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/common/utils/verify_system_config.py",
-      "function": "verify_config",
-      "rule": "PLR0912",
-      "value": 24
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/common/utils/verify_system_config.py",
-      "function": "verify_config",
-      "rule": "PLR0915",
-      "value": 77
     },
     {
       "path": "packages/antcode_core/src/antcode_core/domain/schemas/crawl.py",
@@ -1580,12 +1514,6 @@
       "value": 302
     },
     {
-      "path": "services/web_api/src/antcode_web_api/utils/simple_yaml.py",
-      "function": "_parse_scalar",
-      "rule": "PLR0911",
-      "value": 9
-    },
-    {
       "path": "services/worker/src/antcode_worker/app/main.py",
       "function": "GracefulShutdown._handle_signal",
       "rule": "PLR2004",
@@ -1667,7 +1595,7 @@
       "path": "services/worker/src/antcode_worker/config.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 646
+      "value": 641
     },
     {
       "path": "services/worker/src/antcode_worker/config.py",
