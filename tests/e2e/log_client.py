@@ -14,13 +14,12 @@ import httpx
 from .helpers import API_PREFIX, extract_data, request_json
 
 DEFAULT_STREAM_TIMEOUT_SECONDS = 15.0
-# run 进入终态与 Worker stdout 可从日志 API 查到之间存在固有异步窗口，两段都排在
-# 结果上报之后：Worker 侧 streamer 每 0.5s 刷一次缓冲
-# （services/worker/src/antcode_worker/logging/streamer.py），master 侧
-# log_ingest_loop 以 1s block 消费 Stream
-# （services/master/src/antcode_master/ingester/log_ingest_loop.py）。
-# 所以"终态即日志可查"不是系统提供的保证，查询侧必须显式等到它成立，
-# 超时后连原文一起失败——零等待断言的是一个并不存在的 happens-before。
+# run 进入终态与 Worker stdout 可从日志 API 查到之间存在固有异步窗口，两段都排在结果
+# 上报之后：Worker 侧 BatchSender 按 batch_timeout=1s 攒批
+# （services/worker/src/antcode_worker/logs/batch.py），master 侧 log_ingest_loop 以 1s
+# block 消费 Stream（services/master/src/antcode_master/ingester/log_ingest_loop.py）。
+# 所以"终态即日志可查"不是系统提供的保证，查询侧必须显式等到它成立，超时后连原文一起
+# 失败——零等待断言的是一个并不存在的 happens-before。
 DEFAULT_QUERY_TIMEOUT_SECONDS = 30.0
 DEFAULT_QUERY_INTERVAL_SECONDS = 0.5
 HISTORY_END_TYPES = frozenset({"historical_logs_end", "no_historical_logs"})

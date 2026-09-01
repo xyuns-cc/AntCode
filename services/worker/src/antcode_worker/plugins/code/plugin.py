@@ -10,9 +10,9 @@ language（Master 随 ``params.kwargs.language`` 下发）与 entry_point 后缀
 - java        → java -jar
 - go          → 装配期 `go build` 出的产物本身（不是 `go run`，见 go_execution_policy）
 
-依赖装配假设：
+依赖装配：
 - Python：由 UV/mise 层准备好 venv，context.runtime_spec.python_path 指向解释器
-- Node：workspace 内已 `npm ci`（后续 M4+ 会加自动 npm ci）
+- Node：装配期按 lockfile 离线安装（``node_dependency_policy.install_node_dependencies``）
 - Java：`.jar` 已含依赖或 workspace 有 lib/*.jar
 - Go：外部模块必须随源码提交 vendor，装配期在无网沙箱内编译
 
@@ -107,7 +107,6 @@ class CodePlugin(PluginBase):
         # 拒绝路径穿越（"./main.py" 之类的单点段合法，只拒 '..'；越界由下面 commonpath 兜底）
         if ".." in entry.split("/"):
             return f"entry_point 不合法：不允许包含 '..' ({payload.entry_point})"
-        # commonpath 兜底：解析后必须仍在 workspace / project_cwd 内
         base = payload.project_cwd or payload.workspace_path
         if base:
             try:
