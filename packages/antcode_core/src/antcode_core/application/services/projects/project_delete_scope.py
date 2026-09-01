@@ -83,10 +83,18 @@ async def _task_runs_active(conn, task_ids: tuple[int, ...]) -> bool:
 async def _batch_runs_active(conn, batch_ids: tuple[str, ...]) -> bool:
     """批次 run 无法在 SQL 里直接按项目过滤。
 
-    ``crawl_batch_id`` 埋在 ``result_data`` JSON 里且无表达式索引，Tortoise 的 JSON
-    过滤在 sqlite 执行器上直接抛 ``NotImplementedError``。因此只取哨兵族的**在途**行
-    —— 正向 ``status__in`` 让 ``(task_id, status)`` 复合索引可用，行数被集群在途并发度
-    限住，不会退化成扫全部历史批次 run —— 再按批次归属判定。
+    拦路的不是索引：``idx_task_executions_crawl_batch_id`` /
+    ``idx_task_executions_crawl_batch_status`` 两条表达式索引就建在
+    ``result_data->>'crawl_batch_id'`` 上（见 ``scripts/init_db_indexes.py``）。
+    拦路的是 ORM——Tortoise 的 JSON 过滤在 sqlite 执行器上直接抛
+    ``NotImplementedError``（``must be overridden in each executor``），而单测跑在
+    sqlite 上。因此只取哨兵族的**在途**行 —— 正向 ``status__in`` 让
+    ``(task_id, status)`` 复合索引可用，行数被集群在途并发度限住，不会退化成扫全部
+    历史批次 run —— 再按批次归属判定。
+
+    没有加 LIMIT/分页：结果集被在途并发度而非历史总量限住，ACTIVE 是终态取补、
+    会随 run 结算自然排空。真机实测 ``task_executions`` 共 20 行、哨兵族 0 行，
+    本查询当前返回空集。
 
     解析不出 ``crawl_batch_id`` 的行归属不到任何项目，不计入本项目的在途集合；
     与 ``resolve_run_owner_id`` 的"解析不出即无归属"契约一致。
