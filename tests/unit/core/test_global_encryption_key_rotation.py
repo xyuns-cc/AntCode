@@ -26,6 +26,9 @@ from cryptography.fernet import Fernet, InvalidToken
 
 EXPECTED_NON_EMPTY_REDISPATCH_ENTRIES = 6
 
+#: 与 ``settings.APP_TITLE`` 默认值一致——非 ASCII 不是构造出来的边角输入。
+NON_ASCII_CONFIG = "AntCode 任务调度平台"
+
 
 class _Connection:
     def __init__(
@@ -213,6 +216,29 @@ async def test_plaintext_or_unknown_ciphertext_fails_before_write(monkeypatch) -
         await rotate_postgres_ciphertexts(connection, apply=True, box=box)
 
     assert not any(statement.startswith("UPDATE") for statement, _ in connection.statements)
+
+
+@pytest.mark.asyncio
+async def test_rotation_handles_non_ascii_plaintext(monkeypatch) -> None:
+    """密文里存的是任意用户数据，非 ASCII 明文必须能轮换。
+
+    这不是假想输入：``APP_TITLE`` 的默认值就是 ``"AntCode 任务调度平台"``，会被种进
+    ``system_configs``。修复前 ``hmac.compare_digest`` 收到非 ASCII ``str`` 直接抛
+    ``TypeError``，于是 ``deploy-production.sh rotate-encryption-key`` 在**每个默认
+    安装**上都死在 dry-run 阶段。
+
+    证伪方式：把 ``_same_plaintext`` 里的 ``.encode("utf-8")`` 去掉，这条即变红。
+    """
+    box, legacy = _box(monkeypatch)
+    rows = _rows(legacy)
+    rows["system_configs"][0]["config_value"] = "enc:v1:" + legacy.encrypt(NON_ASCII_CONFIG.encode()).decode()
+    connection = _Connection(rows)
+
+    report = await rotate_postgres_ciphertexts(connection, apply=True, box=box)
+    verified = await verify_postgres_ciphertexts_primary_only(connection, box=box)
+
+    assert report.rows_rewritten == len(GLOBAL_ENCRYPTED_TABLES) + 1
+    assert verified.ciphertexts_requiring_rotation == 0
 
 
 @pytest.mark.asyncio

@@ -173,18 +173,29 @@ def _plan_field(
     )
 
 
+def _same_plaintext(left: str, right: str) -> bool:
+    """比对两段解密明文。
+
+    必须先 encode：``hmac.compare_digest`` 对 ``str`` 只接受纯 ASCII，非 ASCII 抛
+    ``TypeError``。而这里比的是任意用户数据——``init_db`` 就会种一行
+    ``system_configs.app_title = "AntCode 任务调度平台"``，于是密钥轮换在每个
+    默认安装上都会在 dry-run 阶段炸掉。bytes 比对同样是常量时间。
+    """
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
 def _requires_rotation(token: str, plaintext: str, box: SecretBox) -> bool:
     try:
         primary_plaintext = box.decrypt_primary(token)
     except InvalidToken:
         return True
-    if not hmac.compare_digest(primary_plaintext, plaintext):
+    if not _same_plaintext(primary_plaintext, plaintext):
         raise RuntimeError("主密钥与 keyring 解密结果不一致")
     return False
 
 
 def _verify_plaintext(token: str, plaintext: str, box: SecretBox, *, context: str) -> None:
-    if not hmac.compare_digest(box.decrypt_primary(token), plaintext):
+    if not _same_plaintext(box.decrypt_primary(token), plaintext):
         raise RuntimeError(f"密文轮换主密钥复验失败: {context}")
 
 
