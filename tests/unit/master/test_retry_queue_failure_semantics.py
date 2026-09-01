@@ -73,7 +73,7 @@ async def test_structurally_invalid_retry_payload_is_discarded() -> None:
 
 @pytest.mark.asyncio
 async def test_claim_due_discards_undecodable_payload_without_wedging_batch():
-    backend = retry_loop._RetryQueueBackend()
+    backend = retry_loop.RetryQueueBackend()
     redis = AsyncMock()
     redis.evalsha = AsyncMock(return_value=[b'{"task_id": 1, "run_id": "good"}', b"not-json"])
     redis.hdel = AsyncMock()

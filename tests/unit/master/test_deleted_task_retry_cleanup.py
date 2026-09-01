@@ -4,7 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from antcode_master.control.retry_loop import _RetryQueueBackend
+from antcode_core.application.services.scheduler.retry_queue import RetryQueueBackend
 
 
 @pytest.mark.asyncio
@@ -16,7 +16,7 @@ async def test_cancel_task_removes_only_matching_pending_entries() -> None:
     pipeline = MagicMock()
     pipeline.execute = AsyncMock(return_value=[1, 1])
     redis.pipeline = MagicMock(return_value=pipeline)
-    backend = _RetryQueueBackend()
+    backend = RetryQueueBackend()
     backend._get_redis = AsyncMock(return_value=redis)
 
     removed = await backend.cancel_task(7)
@@ -29,7 +29,7 @@ async def test_cancel_task_removes_only_matching_pending_entries() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_task_exposes_redis_failure() -> None:
-    backend = _RetryQueueBackend()
+    backend = RetryQueueBackend()
     backend._get_redis = AsyncMock(side_effect=RuntimeError("redis unavailable"))
 
     with pytest.raises(RuntimeError, match="redis unavailable"):

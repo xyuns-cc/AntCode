@@ -458,12 +458,6 @@
       "value": 1
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
-      "function": "_RetryQueueBackend.requeue",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/scheduler_service.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -987,21 +981,9 @@
     },
     {
       "path": "services/master/src/antcode_master/control/retry_loop.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 445
-    },
-    {
-      "path": "services/master/src/antcode_master/control/retry_loop.py",
       "function": "RetryService._run_loop",
       "rule": "C901",
       "value": 11
-    },
-    {
-      "path": "services/master/src/antcode_master/control/retry_loop.py",
-      "function": "_RetryQueueBackend.requeue",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "services/master/src/antcode_master/control/scheduler_event_loop.py",
@@ -3792,12 +3774,6 @@
       "function": "test_factory_env_endpoint_is_preserved_for_runtime_resolution",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "tests/unit/worker/test_worker_startup.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 339
     },
     {
       "path": "tests/unit/worker/test_worker_startup.py",
