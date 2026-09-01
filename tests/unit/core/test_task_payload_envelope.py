@@ -26,7 +26,6 @@ def _control_encryption_key(monkeypatch):
     monkeypatch.setattr(settings, "ENCRYPTION_KEY_SALT", "task-payload-test-salt")
     monkeypatch.setattr(settings, "ENCRYPTION_KEYS_LEGACY", "")
     monkeypatch.setattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "")
-    monkeypatch.setattr(settings, "ENCRYPTION_ALLOW_LEGACY_SHA256", False)
     secret_box._cached = None
     secret_box._cache_key = None
     yield

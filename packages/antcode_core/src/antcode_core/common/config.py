@@ -136,8 +136,6 @@ class Settings(BaseSettings):
     # T7-P2-5: 密钥轮换。逗号分隔的旧密钥（Fernet 派生前的原文），仅用于解
     # 密老密文。加密永远用当前 ENCRYPTION_KEY。轮换后一段时间可清空。
     ENCRYPTION_KEYS_LEGACY: str = Field(default="", repr=False)
-    # 仅用于迁移旧 base64(sha256(key)) 密文；完成 rotate 后必须关闭。
-    ENCRYPTION_ALLOW_LEGACY_SHA256: bool = Field(default=False)
 
     # === 登录密码加密配置 ===
     LOGIN_PASSWORD_ENCRYPTION_ENABLED: bool = Field(default=True)

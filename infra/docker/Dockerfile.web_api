@@ -91,7 +91,6 @@ COPY --chown=appuser:appgroup \
     scripts/__init__.py \
     scripts/crawl_redis_upgrade_contract.py \
     scripts/crawl_redis_upgrade_execution.py \
-    scripts/crawl_redis_upgrade_migration.py \
     scripts/crawl_redis_upgrade_scan.py \
     scripts/init_db.py \
     scripts/init_db_current_schema.py \

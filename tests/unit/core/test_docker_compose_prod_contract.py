@@ -146,7 +146,6 @@ def test_core_credentials_are_docker_secrets_not_inline_environment() -> None:
         assert environment["REDIS_URL_FILE"] == "/run/secrets/redis_url"
         assert environment["ENCRYPTION_KEY_FILE"] == "/run/secrets/encryption_key"
         assert environment["ENCRYPTION_LEGACY_KDF_SALT"] == "${ENCRYPTION_LEGACY_KDF_SALT:-}"
-        assert environment["ENCRYPTION_ALLOW_LEGACY_SHA256"] == "${ENCRYPTION_ALLOW_LEGACY_SHA256:-false}"
         assert {"DATABASE_URL", "REDIS_URL", "ENCRYPTION_KEY"}.isdisjoint(environment)
         assert CORE_SECRET_NAMES <= set(services[service_name]["secrets"])
 

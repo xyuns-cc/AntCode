@@ -41,27 +41,25 @@ def test_crawl_redis_upgrade_modules_are_in_runtime_image() -> None:
     for module in (
         "crawl_redis_upgrade_contract.py",
         "crawl_redis_upgrade_execution.py",
-        "crawl_redis_upgrade_migration.py",
         "crawl_redis_upgrade_scan.py",
         "migrate_crawl_redis.py",
     ):
         assert f"scripts/{module}" in dockerfile
 
 
-def test_deploy_script_keeps_existing_writers_stopped_until_reviewed_apply() -> None:
+def test_deploy_script_stops_writers_before_the_read_only_redis_gate() -> None:
     deploy = _script(DEPLOY_SCRIPT)
     upgrade_run = "run --rm --no-deps crawl-redis-upgrade"
 
     # 停服集合与依赖图一致：边缘两层的 healthcheck 是穿透式链路探针，控制面一停它们
     # 必然 unhealthy，而 compose 的 `--wait` 对 unhealthy 是快速失败——留着不停会让
-    # existing-upgrade --apply 在收尾那步稳定退出 1（真机实测）。
+    # 部署在收尾那步稳定退出 1（真机实测）。
     assert "readonly STOPPED_SERVICES=(reverse-proxy frontend web-api master gateway worker)" in deploy
     assert 'stop --timeout "$STOP_TIMEOUT" "${STOPPED_SERVICES[@]}"' in deploy
     assert deploy.index('stop --timeout "$STOP_TIMEOUT"') < deploy.index(upgrade_run)
-    assert "existing-upgrade requires --confirm-writers-stopped" in deploy
-    assert "--apply requires a prior dry-run and explicit --preflight-reviewed" in deploy
-    assert "production deployment owns reserved argument" in deploy
-    assert "fresh-deploy is read-only" in deploy
+    # 门禁没有写开关；URL / namespace 由生产部署自己拥有，命令行一律拒绝覆盖。
+    assert "unsupported argument" in deploy
+    assert "rotate-encryption-key requires --confirm-writers-stopped" in deploy
     assert "writers remain stopped" in deploy
     assert deploy.index(upgrade_run) < deploy.rindex("up -d --wait --wait-timeout")
 
@@ -71,8 +69,7 @@ def test_crawl_redis_deployment_readme_documents_the_guarded_entrypoint() -> Non
 
     assert "deploy-production.sh .env.production fresh-deploy" in deployment
     assert "--confirm-writers-stopped" in deployment
-    assert "--apply" in deployment
-    assert "--preflight-reviewed" in deployment
+    assert "存量 Redis 不受支持" in deployment
     assert "writer" in deployment
     docker_environment = _script(Path("infra/docker/.env.example"))
     assert "REDIS_NAMESPACE=antcode" in docker_environment

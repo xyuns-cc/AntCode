@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.prod.yml"
-readonly USAGE="usage: deploy-production.sh ENV_FILE {fresh-deploy|existing-upgrade|rotate-encryption-key} [arguments]"
+readonly USAGE="usage: deploy-production.sh ENV_FILE {fresh-deploy|rotate-encryption-key} [arguments]"
 readonly SOURCE_ENV_FILE="${1:?${USAGE}}"
 readonly UPGRADE_MODE="${2:?${USAGE}}"
 readonly WAIT_TIMEOUT="${ANTCODE_DEPLOY_WAIT_TIMEOUT_SECONDS:-300}"
@@ -27,8 +27,8 @@ readonly RUNTIME_SERVICES=(postgres redis reverse-proxy)
 # （`docker-compose.prod.edge.yml:52-61,94-103`，frontend 打 web-api、reverse-proxy 打
 # frontend），所以只要控制面被停，它们必然转 unhealthy。留着不停有两个真机实测后果：
 #   1) 收尾的 `up -d --wait` 会撞上一个**早已 unhealthy**的 reverse-proxy —— compose 的
-#      `--wait` 对 unhealthy 是快速失败，不等它恢复，于是整条 existing-upgrade --apply
-#      在最后一步退出 1，而栈其实几十秒后自愈；
+#      `--wait` 对 unhealthy 是快速失败，不等它恢复，于是整条部署在最后一步退出 1，
+#      而栈其实几十秒后自愈；
 #   2) frontend 在 edge 网上是动态地址，被重建后 reverse-proxy 得靠 `resolver valid=10s`
 #      重新解析（`nginx.prod.conf:19-25`），中间必然有一段解析失败窗口。
 # 本来就是停机窗口，边缘一并停掉即可：`up -d --wait` 会按 depends_on 依次
@@ -46,35 +46,24 @@ trap cleanup_env EXIT
 cp -- "$SOURCE_ENV_FILE" "$ENV_FILE"
 
 case "$UPGRADE_MODE" in
-    fresh-deploy | existing-upgrade | rotate-encryption-key) ;;
-    *) printf 'invalid Crawl Redis upgrade mode: %s\n%s\n' "$UPGRADE_MODE" "$USAGE" >&2; exit 2 ;;
+    fresh-deploy | rotate-encryption-key) ;;
+    *) printf 'invalid deployment mode: %s\n%s\n' "$UPGRADE_MODE" "$USAGE" >&2; exit 2 ;;
 esac
 
+# 两个模式都只读取这一个可选开关，其余一律拒绝：URL / namespace 之类由生产部署自己
+# 拥有，运维方不能从命令行覆盖。
 shift 2
-apply_requested=false
-preflight_reviewed=false
 writers_confirmed=false
-upgrade_arguments=()
 for argument in "$@"; do
     case "$argument" in
-        --apply) apply_requested=true; upgrade_arguments+=("$argument") ;;
-        --preflight-reviewed) preflight_reviewed=true ;;
-        --confirm-writers-stopped) writers_confirmed=true; upgrade_arguments+=("$argument") ;;
-        --mode | --mode=* | --url | --url=* | --namespace | --namespace=*)
-            printf 'production deployment owns reserved argument: %s\n' "$argument" >&2
-            exit 2
-            ;;
-        *) upgrade_arguments+=("$argument") ;;
+        --confirm-writers-stopped) writers_confirmed=true ;;
+        *) printf 'unsupported argument: %s\n%s\n' "$argument" "$USAGE" >&2; exit 2 ;;
     esac
 done
 
 if [[ "$UPGRADE_MODE" == "rotate-encryption-key" ]]; then
     if [[ "$writers_confirmed" != true ]]; then
         printf '%s\n' 'rotate-encryption-key requires --confirm-writers-stopped' >&2
-        exit 2
-    fi
-    if [[ "${#upgrade_arguments[@]}" -ne 1 ]]; then
-        printf '%s\n' 'rotate-encryption-key accepts only --confirm-writers-stopped' >&2
         exit 2
     fi
     compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
@@ -91,35 +80,12 @@ if [[ "$UPGRADE_MODE" == "rotate-encryption-key" ]]; then
     exit 0
 fi
 
-if [[ "$UPGRADE_MODE" == "fresh-deploy" && "$apply_requested" == true ]]; then
-    printf '%s\n' 'fresh-deploy is read-only and does not accept --apply' >&2
-    exit 2
-fi
-if [[ "$UPGRADE_MODE" == "existing-upgrade" && "$writers_confirmed" != true ]]; then
-    printf '%s\n' 'existing-upgrade requires --confirm-writers-stopped after every Redis writer is stopped' >&2
-    exit 2
-fi
-if [[ "$apply_requested" == true && "$preflight_reviewed" != true ]]; then
-    printf '%s\n' '--apply requires a prior dry-run and explicit --preflight-reviewed' >&2
-    exit 2
-fi
-if [[ "$apply_requested" != true && "$preflight_reviewed" == true ]]; then
-    printf '%s\n' '--preflight-reviewed is valid only together with --apply' >&2
-    exit 2
-fi
-
 compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 build_images
 "${compose[@]}" stop --timeout "$STOP_TIMEOUT" "${STOPPED_SERVICES[@]}"
 "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT" postgres redis
 "${compose[@]}" run --rm --no-deps crawl-redis-upgrade \
-    python -m scripts.migrate_crawl_redis \
-    --mode "$UPGRADE_MODE" "${upgrade_arguments[@]}"
-
-if [[ "$UPGRADE_MODE" == "existing-upgrade" && "$apply_requested" != true ]]; then
-    printf '%s\n' 'dry-run passed; writers remain stopped. Review the report, then rerun with --apply --preflight-reviewed.'
-    exit 0
-fi
+    python -m scripts.migrate_crawl_redis
 
 "${compose[@]}" run --rm --no-deps migration
 

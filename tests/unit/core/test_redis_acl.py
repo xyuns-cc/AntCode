@@ -21,7 +21,6 @@ def _ensure_encryption_key(monkeypatch):
     cfg.settings.ENCRYPTION_KEY = "test-key-for-acl-suite-32-bytes-minimum"
     cfg.settings.ENCRYPTION_KEY_SALT = "redis-acl-test-salt-value"
     cfg.settings.ENCRYPTION_LEGACY_KDF_SALT = ""
-    cfg.settings.ENCRYPTION_ALLOW_LEGACY_SHA256 = False
     cfg.settings.REDIS_ACL_ENABLED = True
 
 

@@ -9,7 +9,6 @@ def _set_key(monkeypatch):
     monkeypatch.setattr(config.settings, "ENCRYPTION_KEY", "test-encrypted-field-key-32-bytes-min")
     monkeypatch.setattr(config.settings, "ENCRYPTION_KEY_SALT", "encrypted-field-test-salt")
     monkeypatch.setattr(config.settings, "ENCRYPTION_LEGACY_KDF_SALT", "")
-    monkeypatch.setattr(config.settings, "ENCRYPTION_ALLOW_LEGACY_SHA256", False)
     secret_box._cached = None
     secret_box._cache_key = None
 

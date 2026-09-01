@@ -11,8 +11,8 @@
 - 生产 compose 的 ``crawl-redis-upgrade`` 服务（``docker-compose.prod.middleware.yml``）
   按最小权限**只挂 Redis secret**，却要跑 ``scripts.check_ready_streams``（runbook §4.1
   的排空门禁）与 ``scripts.migrate_crawl_redis``（``deploy-production.sh`` 的必经步骤）。
-  这两条曾经通过 ``common.security`` 聚合包间接拖进 ``settings``，导致 fresh-deploy 与
-  existing-upgrade **两种模式都在该步骤崩溃**——真机实测出来的，不是理论风险。
+  这两条曾经通过 ``common.security`` 聚合包间接拖进 ``settings``，导致部署**必然在该
+  步骤崩溃**——真机实测出来的，不是理论风险。
 
 这些用例锁住该边界：谁把 ``settings`` 拉回模块作用域，谁在这里挂。
 """

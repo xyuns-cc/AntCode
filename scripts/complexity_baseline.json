@@ -695,7 +695,7 @@
       "path": "packages/antcode_core/src/antcode_core/common/config.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 389
+      "value": 387
     },
     {
       "path": "packages/antcode_core/src/antcode_core/common/security/auth.py",

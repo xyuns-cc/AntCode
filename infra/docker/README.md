@@ -251,36 +251,16 @@ infra/docker/deploy-production.sh .env.production rotate-encryption-key --confir
 infra/docker/deploy-production.sh .env.production fresh-deploy
 ```
 
-`fresh-deploy` 只适用于全新 Redis；检测到旧 key、当前 Crawl 数据、未排空执行队列
-或不受支持 envelope 时会拒绝启动控制面。既有环境必须先停止所有独立 Worker 和
-其他仓库外 Redis writer、完成 Redis 备份，再执行 dry-run。脚本也会停止本
-Compose 的 writer；dry-run 成功后仍保持它们停止，不会自动恢复服务：
+`fresh-deploy` 是唯一的部署入口，也只适用于全新 Redis。它把 Redis 门禁跑成纯只读
+预检：检测到旧 key、当前 Crawl 数据、未排空执行队列或不受支持 envelope 时打印 JSON
+报告并阻断，控制面不会启动。门禁没有任何写开关，工具不会替运维方改写 Redis；
+报告有 blocker、schema 初始化失败都会返回非零，writer 保持停止。
 
-```bash
-infra/docker/deploy-production.sh .env.production existing-upgrade \
-  --confirm-writers-stopped \
-  --paused-project project-1 \
-  --paused-batch project-1:batch-1
-```
+存量 Redis 不受支持：唯一处置是人工核对报告后清空/重建目标 Redis，再重跑门禁。
 
-人工核对 JSON 报告的 `safe`、key、类型、数量、PEL、lag 和目标 key 后，在没有恢复
-任何 writer、没有改变暂停声明的前提下，使用完全相同参数增加两个显式确认。工具
-会重新执行完整预检，只有仍安全时才迁移，随后执行数据库 migration 并恢复整栈：
-
-```bash
-infra/docker/deploy-production.sh .env.production existing-upgrade \
-  --confirm-writers-stopped \
-  --paused-project project-1 \
-  --paused-batch project-1:batch-1 \
-  --apply \
-  --preflight-reviewed
-```
-
-`--apply` 缺少 `--preflight-reviewed`、既有升级缺少停写确认、报告有 blocker 或 Redis
-写入/校验失败、schema 初始化失败都会返回非零，writer 保持停止。
-独立 Worker 不属于控制面 Compose，
-脚本无法替运维方停止或证明其状态；`--confirm-writers-stopped` 是对所有外部 writer
-也已停机的明确确认。
+独立 Worker 不属于控制面 Compose，脚本无法替运维方停止或证明其状态；
+`rotate-encryption-key` 的 `--confirm-writers-stopped` 是对所有外部 writer 也已停机的
+明确确认。
 
 所有长期服务都设置 CPU、内存、PID、只读根和日志轮转边界；Redis 使用
 `maxmemory` + `noeviction`。

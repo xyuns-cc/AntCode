@@ -8,8 +8,6 @@ T7-P2-5: 支持密钥轮换 (MultiFernet)
   重启服务 → 老密文由 legacy 解密解开，写回时用新 key 重加密（Fernet 自
   带 rotate）→ 一段时间后把 legacy 清空。
 
-旧 SHA256 派生只在显式迁移开关开启时加入 keyring，迁移完成后必须关闭。
-
 P2-17: KDF 加固
 ---------------
 旧派生 ``base64(sha256(key))`` 无盐单轮,低熵 ``ENCRYPTION_KEY`` (常见运维随机
@@ -17,15 +15,11 @@ P2-17: KDF 加固
 - 优先识别 **Fernet 原生 key**(44 字节 urlsafe-base64 编码后是 32 字节): 直接使用。
 - 否则走 **PBKDF2-HMAC-SHA256, 100k 迭代**，并强制要求显式、每部署唯一的
   ``ENCRYPTION_KEY_SALT``（至少 16 字节），不再使用全局固定盐。
-
-向后兼容由 ``ENCRYPTION_ALLOW_LEGACY_SHA256`` 显式控制。开启时旧 SHA256 key
-只用于 decrypt；执行 rotate 后关闭开关，避免弱派生 key 永久驻留 keyring。
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from cryptography.hazmat.primitives import hashes
@@ -43,7 +37,7 @@ class SecretBox:
     def __init__(self) -> None:
         self._cached: MultiFernet | None = None
         # 缓存 key 也要包含 salt 变化,避免 env 改 salt 后仍返回旧实例
-        self._cache_key: tuple[str, str, str, str, bool] | None = None
+        self._cache_key: tuple[str, str, str, str] | None = None
 
     def encrypt(self, plaintext: str) -> str:
         return self._multi().encrypt(plaintext.encode("utf-8")).decode("utf-8")
@@ -95,11 +89,6 @@ class SecretBox:
         )
         return base64.urlsafe_b64encode(kdf.derive(key_material.encode("utf-8")))
 
-    def _derive_legacy_sha256_key(self, key_material: str) -> bytes:
-        """旧派生方式,仅用于 decrypt 老密文(dual-decrypt 向后兼容)。"""
-        digest = hashlib.sha256(key_material.encode("utf-8")).digest()
-        return base64.urlsafe_b64encode(digest)
-
     def _primary(self) -> Fernet:
         primary = (settings.ENCRYPTION_KEY or "").strip()
         salt = (getattr(settings, "ENCRYPTION_KEY_SALT", "") or "").strip()
@@ -112,9 +101,8 @@ class SecretBox:
         legacy = (getattr(settings, "ENCRYPTION_KEYS_LEGACY", "") or "").strip()
         salt = (getattr(settings, "ENCRYPTION_KEY_SALT", "") or "").strip()
         legacy_kdf_salt = (getattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "") or "").strip()
-        allow_legacy_sha256 = bool(getattr(settings, "ENCRYPTION_ALLOW_LEGACY_SHA256", False))
         # 缓存命中（primary/legacy/salt 三者未变）
-        cache_key = (primary, legacy, salt, legacy_kdf_salt, allow_legacy_sha256)
+        cache_key = (primary, legacy, salt, legacy_kdf_salt)
         if self._cached is not None and self._cache_key == cache_key:
             return self._cached
 
@@ -124,8 +112,6 @@ class SecretBox:
         fernets: list[Fernet] = [self._primary()]
         if legacy_kdf_salt and legacy_kdf_salt != salt:
             fernets.append(Fernet(self._derive_fernet_key(primary, legacy_kdf_salt)))
-        if allow_legacy_sha256:
-            fernets.append(Fernet(self._derive_legacy_sha256_key(primary)))
         if legacy:
             seen: set[str] = {primary}
             for k in legacy.split(","):
@@ -136,8 +122,6 @@ class SecretBox:
                 fernets.append(Fernet(self._derive_fernet_key(k, salt)))
                 if legacy_kdf_salt and legacy_kdf_salt != salt:
                     fernets.append(Fernet(self._derive_fernet_key(k, legacy_kdf_salt)))
-                if allow_legacy_sha256:
-                    fernets.append(Fernet(self._derive_legacy_sha256_key(k)))
         self._cached = MultiFernet(fernets)
         self._cache_key = cache_key
         return self._cached

@@ -11,7 +11,6 @@ x-backend-environment: &backend-environment
   ENCRYPTION_KEY_SALT_FILE: /run/secrets/encryption_key_salt
   ENCRYPTION_KEYS_LEGACY_FILE: /run/secrets/encryption_keys_legacy
   ENCRYPTION_LEGACY_KDF_SALT: ${ENCRYPTION_LEGACY_KDF_SALT:-}
-  ENCRYPTION_ALLOW_LEGACY_SHA256: ${ENCRYPTION_ALLOW_LEGACY_SHA256:-false}
   REDIS_NAMESPACE: ${REDIS_NAMESPACE:?REDIS_NAMESPACE is required}
   REDIS_ACL_ENABLED: "true"
   AUTH_COOKIE_SECURE: "true"

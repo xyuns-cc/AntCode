@@ -8,14 +8,12 @@ def test_production_upgrade_runs_schema_init_before_starting_services() -> None:
     script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     stop_writers = '"${compose[@]}" stop --timeout'
     crawl_upgrade = "python -m scripts.migrate_crawl_redis"
-    dry_run_exit = "dry-run passed; writers remain stopped"
     schema_init = '"${compose[@]}" run --rm --no-deps migration\n'
     start_services = '"${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT"'
 
     assert script.startswith("#!/usr/bin/env bash\nset -euo pipefail\n")
     assert script.index(stop_writers) < script.index(crawl_upgrade)
-    assert script.index(crawl_upgrade) < script.index(dry_run_exit)
-    assert script.index(dry_run_exit) < script.index(schema_init)
+    assert script.index(crawl_upgrade) < script.index(schema_init)
     assert script.index(schema_init) < script.rindex(start_services)
 
 
