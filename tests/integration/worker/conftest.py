@@ -145,9 +145,9 @@ def _patch_redis_from_url():
 @pytest.fixture
 def direct_transport_factory():
     """Construct a Direct transport backed by a real in-process lease control."""
-    from antcode_worker.transport import RedisTransport
     from antcode_worker.transport.redis.direct_control import DirectControlClient
     from antcode_worker.transport.redis.keys import RedisKeys
+    from antcode_worker.transport.redis.transport import RedisTransport
 
     def build(
         redis_url: str,

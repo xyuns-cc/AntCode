@@ -44,22 +44,21 @@ class TestWorkerStartup:
 
 class TestTransportLayer:
     def test_transport_base_import(self):
-        from antcode_worker.transport import TransportMode, WorkerState
+        from antcode_worker.transport.base import TransportMode, WorkerState
 
         assert TransportMode.DIRECT.value == "direct"
         assert TransportMode.GATEWAY.value == "gateway"
         assert WorkerState.ONLINE.value == "online"
 
     def test_redis_transport_import(self):
-        from antcode_worker.transport import RedisTransport
+        from antcode_worker.transport.redis.transport import RedisTransport
 
         transport = RedisTransport(redis_url="redis://localhost:6379/0")
         assert transport.mode.value == "direct"
         assert not transport.is_running
 
     def test_gateway_transport_import(self):
-        from antcode_worker.transport import GatewayTransport
-        from antcode_worker.transport.gateway.transport import GatewayConfig
+        from antcode_worker.transport.gateway.transport import GatewayConfig, GatewayTransport
 
         gateway_config = GatewayConfig(
             gateway_host="localhost",
@@ -96,7 +95,7 @@ class TestModuleImports:
         assert LogManager is not None
 
     def test_heartbeat_module(self):
-        from antcode_worker.heartbeat import CapabilityDetector
+        from antcode_worker.heartbeat.capability_detector import CapabilityDetector
 
         detector = CapabilityDetector()
         capabilities = detector.detect_all()
@@ -105,14 +104,14 @@ class TestModuleImports:
 
 class TestFlowControl:
     def test_flow_control_import(self):
-        from antcode_worker.transport import FlowControlStrategy
+        from antcode_worker.transport.flow_control import FlowControlStrategy
 
         assert FlowControlStrategy.TOKEN_BUCKET.value == "token_bucket"
         assert FlowControlStrategy.AIMD.value == "aimd"
         assert FlowControlStrategy.SLIDING_WINDOW.value == "sliding_window"
 
     def test_backpressure_levels(self):
-        from antcode_worker.transport import BackpressureLevel
+        from antcode_worker.transport.flow_control import BackpressureLevel
 
         assert BackpressureLevel.NONE.value == "none"
         assert BackpressureLevel.LOW.value == "low"
@@ -121,7 +120,7 @@ class TestFlowControl:
         assert BackpressureLevel.CRITICAL.value == "critical"
 
     def test_flow_control_config(self):
-        from antcode_worker.transport import FlowControlConfig, FlowControlStrategy
+        from antcode_worker.transport.flow_control import FlowControlConfig, FlowControlStrategy
 
         config = FlowControlConfig(
             strategy=FlowControlStrategy.TOKEN_BUCKET,
@@ -134,7 +133,7 @@ class TestFlowControl:
         assert config.refill_rate == 10.0
 
     def test_create_flow_controller_factory(self):
-        from antcode_worker.transport import (
+        from antcode_worker.transport.flow_control import (
             AIMDController,
             FlowControlStrategy,
             SlidingWindowController,
@@ -152,7 +151,7 @@ class TestFlowControl:
         assert isinstance(sw, SlidingWindowController)
 
     def test_backpressure_manager(self):
-        from antcode_worker.transport import (
+        from antcode_worker.transport.flow_control import (
             BackpressureLevel,
             BackpressureManager,
             FlowControlConfig,
@@ -175,7 +174,7 @@ class TestFlowControl:
 @pytest.mark.asyncio
 class TestFlowControlAsync:
     async def test_token_bucket_acquire(self):
-        from antcode_worker.transport import FlowControlConfig, TokenBucketController
+        from antcode_worker.transport.flow_control import FlowControlConfig, TokenBucketController
 
         config = FlowControlConfig(bucket_capacity=3, refill_rate=1.0)
         controller = TokenBucketController(config)
@@ -195,7 +194,7 @@ class TestFlowControlAsync:
         assert controller.stats.rejected_requests == 1
 
     async def test_aimd_rate_adjustment(self):
-        from antcode_worker.transport import AIMDController, FlowControlConfig, FlowControlStrategy
+        from antcode_worker.transport.flow_control import AIMDController, FlowControlConfig, FlowControlStrategy
 
         config = FlowControlConfig(
             strategy=FlowControlStrategy.AIMD,
@@ -218,7 +217,11 @@ class TestFlowControlAsync:
         assert controller._current_rate < rate_before_failure
 
     async def test_sliding_window_limit(self):
-        from antcode_worker.transport import FlowControlConfig, FlowControlStrategy, SlidingWindowController
+        from antcode_worker.transport.flow_control import (
+            FlowControlConfig,
+            FlowControlStrategy,
+            SlidingWindowController,
+        )
 
         config = FlowControlConfig(
             strategy=FlowControlStrategy.SLIDING_WINDOW,
@@ -240,7 +243,7 @@ class TestFlowControlAsync:
 @pytest.mark.asyncio
 class TestTransportAsync:
     async def test_redis_transport_start_stop(self):
-        from antcode_worker.transport import RedisTransport
+        from antcode_worker.transport.redis.transport import RedisTransport
 
         transport = RedisTransport(redis_url="redis://localhost:6379/0")
 
@@ -253,8 +256,7 @@ class TestTransportAsync:
         assert not transport.is_running
 
     async def test_gateway_transport_start_stop(self):
-        from antcode_worker.transport import GatewayTransport
-        from antcode_worker.transport.gateway.transport import GatewayConfig
+        from antcode_worker.transport.gateway.transport import GatewayConfig, GatewayTransport
 
         gateway_config = GatewayConfig(
             gateway_host="localhost",
@@ -273,8 +275,8 @@ class TestTransportAsync:
         assert not transport.is_running
 
     async def test_transport_status(self):
-        from antcode_worker.transport import GatewayTransport, RedisTransport
-        from antcode_worker.transport.gateway.transport import GatewayConfig
+        from antcode_worker.transport.gateway.transport import GatewayConfig, GatewayTransport
+        from antcode_worker.transport.redis.transport import RedisTransport
 
         redis_transport = RedisTransport(redis_url="redis://localhost:6379/0")
         status = redis_transport.get_status()

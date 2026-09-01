@@ -310,7 +310,7 @@ class TestResultIdempotency:
         2. Master 端可以通过 run_id 去重
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
 
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)
@@ -392,7 +392,7 @@ class TestResultIdempotency:
         2. Master 端应该使用最新的结果
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
 
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)

@@ -58,7 +58,7 @@ class TestDirectModeIntegration:
         """测试 Redis 心跳发送"""
         from datetime import datetime
 
-        from antcode_worker.transport import HeartbeatMessage
+        from antcode_worker.transport.base import HeartbeatMessage
 
         transport = direct_transport_factory(REDIS_URL, unique_worker_id)
         await transport.start()
@@ -92,7 +92,7 @@ class TestDirectModeIntegration:
         from datetime import datetime
 
         import redis.asyncio as aioredis
-        from antcode_worker.transport import LogMessage
+        from antcode_worker.transport.base import LogMessage
 
         namespace = f"test:worker:{unique_worker_id}"
         keys = RedisKeys(namespace=namespace)
@@ -144,7 +144,7 @@ class TestWorkerComponents:
 
     def test_capability_detection(self):
         """测试能力检测"""
-        from antcode_worker.heartbeat import CapabilityDetector
+        from antcode_worker.heartbeat.capability_detector import CapabilityDetector
 
         detector = CapabilityDetector()
         capabilities = detector.detect_all()

@@ -209,7 +209,7 @@ class TestTaskCancellation:
         2. 结果正确写入
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
 
         unique_prefix = f"test:cancel:{uuid.uuid4().hex[:8]}:"
 
@@ -283,7 +283,7 @@ class TestTaskCancellation:
         2. ACK 正确写入
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig
+        from antcode_worker.transport.base import ServerConfig
 
         redis_client = aioredis.from_url(
             REDIS_URL,

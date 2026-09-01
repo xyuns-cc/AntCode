@@ -66,8 +66,9 @@ class TestDirectModeE2E:
         3. Worker 可以 ACK 任务
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig
+        from antcode_worker.transport.base import ServerConfig
         from antcode_worker.transport.redis.keys import RedisKeys
+        from antcode_worker.transport.redis.transport import RedisTransport
 
         redis_client = aioredis.from_url(
             REDIS_URL,
@@ -150,8 +151,9 @@ class TestDirectModeE2E:
         2. 重试会产生可由 Master 按 run_id 去重的重复帧
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
         from antcode_worker.transport.redis.keys import RedisKeys
+        from antcode_worker.transport.redis.transport import RedisTransport
 
         redis_client = aioredis.from_url(
             REDIS_URL,
@@ -307,8 +309,9 @@ class TestDirectModeE2E:
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
         from antcode_worker.executor.process import ProcessExecutor
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
         from antcode_worker.transport.redis.keys import RedisKeys
+        from antcode_worker.transport.redis.transport import RedisTransport
 
         keys = RedisKeys()
 
@@ -444,7 +447,7 @@ class TestDirectModeE2E:
         3. 未 ACK 的任务可以被 reclaim
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig
+        from antcode_worker.transport.base import ServerConfig
 
         redis_client = aioredis.from_url(
             REDIS_URL,

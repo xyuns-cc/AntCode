@@ -104,7 +104,7 @@ async def _master_result_environment(
 
 
 def _successful_task_result(*, run_id: str, task_id: str, lease_id: str):
-    from antcode_worker.transport import TaskResult
+    from antcode_worker.transport.base import TaskResult
 
     return TaskResult(
         run_id=run_id,
@@ -656,7 +656,7 @@ class TestIdempotentResultReporting:
         2. 不会抛出异常
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
 
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)
@@ -721,7 +721,7 @@ class TestIdempotentResultReporting:
         2. 关键字段（status, exit_code）保持不变
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
 
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)
@@ -798,7 +798,7 @@ class TestIdempotentResultReporting:
         import importlib
 
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig
+        from antcode_worker.transport.base import ServerConfig
 
         unique_task_id = f"fault-task-{uuid.uuid4().hex[:8]}"
         unique_worker_id = f"fault-worker-{uuid.uuid4().hex[:8]}"
@@ -861,7 +861,7 @@ class TestIdempotentResultReporting:
         2. 所有上报都成功
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
 
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)
@@ -923,7 +923,7 @@ class TestIdempotentResultReporting:
         2. 重连后重复 ACK 不会产生错误
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig
+        from antcode_worker.transport.base import ServerConfig
 
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)
@@ -1057,8 +1057,7 @@ class TestLogThroughputStress:
         2. 不会丢失数据
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig
-        from antcode_worker.transport.base import LogMessage
+        from antcode_worker.transport.base import LogMessage, ServerConfig
 
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)
@@ -1582,7 +1581,7 @@ class TestRedisBackpressureStress:
         2. 不会丢失数据
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
 
         namespace = unique_stream_prefix.rstrip(":")
         keys = RedisKeys(namespace=namespace)

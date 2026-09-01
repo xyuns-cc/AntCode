@@ -14,7 +14,7 @@ import pytest_asyncio
 import redis.asyncio as aioredis
 from antcode_contracts import data_pb2
 from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
-from antcode_worker.transport import ServerConfig, TaskResult
+from antcode_worker.transport.base import ServerConfig, TaskResult
 from antcode_worker.transport.redis.keys import RedisKeys
 
 REDIS_URL = os.getenv("ANTCODE_INTEGRATION_REDIS_URL", "")

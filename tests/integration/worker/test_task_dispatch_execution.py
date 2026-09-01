@@ -83,8 +83,9 @@ class TestDirectModeTaskDispatch:
         3. 任务数据完整传递
         """
         import redis.asyncio as aioredis
-        from antcode_worker.transport import RedisTransport, ServerConfig
+        from antcode_worker.transport.base import ServerConfig
         from antcode_worker.transport.redis.keys import RedisKeys
+        from antcode_worker.transport.redis.transport import RedisTransport
 
         redis_client = aioredis.from_url(
             REDIS_URL,
@@ -250,8 +251,9 @@ class TestDirectModeTaskDispatch:
         from antcode_worker.domain.models import ExecPlan, RuntimeHandle
         from antcode_worker.executor.base import ExecutorConfig, NoOpLogSink
         from antcode_worker.executor.process import ProcessExecutor
-        from antcode_worker.transport import RedisTransport, ServerConfig, TaskResult
+        from antcode_worker.transport.base import ServerConfig, TaskResult
         from antcode_worker.transport.redis.keys import RedisKeys
+        from antcode_worker.transport.redis.transport import RedisTransport
 
         redis_client = aioredis.from_url(
             REDIS_URL,
