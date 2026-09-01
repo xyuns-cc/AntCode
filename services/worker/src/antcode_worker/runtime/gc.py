@@ -413,12 +413,7 @@ class RuntimeGC:
             return False
 
     async def run_gc(self) -> GCRunResult:
-        """
-        执行一次垃圾回收
-
-        Returns:
-            GC 结果
-        """
+        """执行一次垃圾回收"""
         result: GCRunResult = {
             "cleaned": 0,
             "bytes_freed": 0,

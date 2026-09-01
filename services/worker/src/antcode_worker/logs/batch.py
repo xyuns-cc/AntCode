@@ -151,16 +151,9 @@ class BatchSender:
         logger.info(f"[{self.run_id}] 批量发送器已停止")
 
     async def write(self, entry: LogEntry) -> bool:
-        """
-        写入日志条目到队列
+        """写入日志条目到队列
 
         实现 LogSink 协议。
-
-        Args:
-            entry: 日志条目
-
-        Returns:
-            是否成功入队
         """
         self._raise_terminal_error()
         if not self._running:
@@ -375,12 +368,7 @@ class BatchSink:
     """
 
     def __init__(self, sender: BatchSender):
-        """
-        初始化
-
-        Args:
-            sender: 批量发送器
-        """
+        """初始化"""
         self._sender = sender
 
     async def write(self, entry: LogEntry) -> bool:

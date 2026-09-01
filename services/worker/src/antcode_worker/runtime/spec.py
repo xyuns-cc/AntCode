@@ -73,12 +73,7 @@ class LockSource:
         return hash(tuple(sorted(self.requirements)))
 
     def to_dict(self, sort_requirements: bool = False) -> dict[str, Any]:
-        """
-        转换为字典
-
-        Args:
-            sort_requirements: 是否对 requirements 排序（用于哈希计算）
-        """
+        """转换为字典"""
         return {"requirements": sorted(self.requirements) if sort_requirements else self.requirements}
 
     @classmethod

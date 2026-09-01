@@ -94,14 +94,7 @@ class SecretsManager:
         env_prefix: str = "ANTCODE_",
         on_reload: Callable[[], None] | None = None,
     ):
-        """
-        初始化凭证管理器
-
-        Args:
-            secrets_dir: 凭证目录路径
-            env_prefix: 环境变量前缀
-            on_reload: 重载回调
-        """
+        """初始化凭证管理器"""
         self._secrets_dir = secrets_dir
         self._env_prefix = env_prefix
         self._on_reload = on_reload
@@ -409,12 +402,7 @@ class SecretsManager:
             pass
 
     def validate(self) -> dict[str, bool]:
-        """
-        验证凭证配置
-
-        Returns:
-            dict: 各凭证的验证结果
-        """
+        """验证凭证配置"""
         results = {}
 
         # 检查 API Key
@@ -464,18 +452,7 @@ def init_secrets_manager(
     on_reload: Callable[[], None] | None = None,
     install_signal_handler: bool = True,
 ) -> SecretsManager:
-    """
-    初始化全局凭证管理器
-
-    Args:
-        secrets_dir: 凭证目录路径
-        env_prefix: 环境变量前缀
-        on_reload: 重载回调
-        install_signal_handler: 是否安装 SIGHUP 处理器
-
-    Returns:
-        SecretsManager: 凭证管理器实例
-    """
+    """初始化全局凭证管理器"""
     manager = SecretsManager(
         secrets_dir=secrets_dir,
         env_prefix=env_prefix,

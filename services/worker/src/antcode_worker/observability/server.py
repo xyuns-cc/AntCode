@@ -66,13 +66,9 @@ class ObservabilityServer:
         return self._metrics_collector
 
     async def health(self, request: Any) -> Any:
-        """
-        基本健康检查端点
+        """基本健康检查端点
 
         GET /health
-
-        Returns:
-            JSON 响应: {"status": "ok"}
         """
         if not HAS_AIOHTTP:
             return None
@@ -85,15 +81,10 @@ class ObservabilityServer:
         )
 
     async def liveness(self, request: Any) -> Any:
-        """
-        K8s 存活探针端点
+        """K8s 存活探针端点
 
         GET /health/live
-
         检查进程是否存活，失败会触发 Pod 重启。
-
-        Returns:
-            JSON 响应: {"status": "healthy|unhealthy", "message": "..."}
         """
         if not HAS_AIOHTTP:
             return None
@@ -110,15 +101,10 @@ class ObservabilityServer:
         )
 
     async def readiness(self, request: Any) -> Any:
-        """
-        K8s 就绪探针端点
+        """K8s 就绪探针端点
 
         GET /health/ready
-
         检查服务是否可以接收流量。
-
-        Returns:
-            JSON 响应: {"status": "healthy|degraded|unhealthy", "message": "...", "details": {...}}
         """
         if not HAS_AIOHTTP:
             return None
@@ -136,13 +122,9 @@ class ObservabilityServer:
         )
 
     async def metrics(self, request: Any) -> Any:
-        """
-        Prometheus 指标端点
+        """Prometheus 指标端点
 
         GET /metrics
-
-        Returns:
-            Prometheus 格式的指标文本
         """
         if not HAS_AIOHTTP:
             return None
@@ -154,13 +136,7 @@ class ObservabilityServer:
         )
 
     async def start(self, host: str = "0.0.0.0", port: int = 8001) -> None:
-        """
-        启动 HTTP 服务器
-
-        Args:
-            host: 绑定地址
-            port: 绑定端口
-        """
+        """启动 HTTP 服务器"""
         if not HAS_AIOHTTP:
             logger.warning("aiohttp 未安装，无法启动可观测性服务器")
             return

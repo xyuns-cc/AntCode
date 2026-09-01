@@ -84,12 +84,7 @@ class Identity:
             return None
 
     def save(self, path: Path) -> bool:
-        """
-        保存身份到文件
-
-        Returns:
-            bool: 保存是否成功
-        """
+        """保存身份到文件"""
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             data = {
@@ -365,20 +360,7 @@ def init_identity_manager(
     on_reload: Callable[[Identity], None] | None = None,
     install_signal_handler: bool = True,
 ) -> IdentityManager:
-    """
-    初始化全局身份管理器
-
-    Args:
-        identity_path: 身份文件路径
-        zone: 区域
-        labels: 标签
-        version: 版本
-        on_reload: 重载回调
-        install_signal_handler: 是否安装 SIGHUP 处理器
-
-    Returns:
-        IdentityManager: 身份管理器实例
-    """
+    """初始化全局身份管理器"""
     manager = IdentityManager(
         identity_path=identity_path,
         zone=zone,

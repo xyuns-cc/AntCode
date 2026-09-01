@@ -107,12 +107,7 @@ class FlowController(ABC):
 
     @abstractmethod
     async def release(self, count: int = 1) -> None:
-        """
-        释放许可（某些策略可能不需要）
-
-        Args:
-            count: 释放的许可数量
-        """
+        """释放许可（某些策略可能不需要）"""
         pass
 
     @abstractmethod
@@ -465,12 +460,7 @@ class BackpressureManager:
         return self.get_level() == BackpressureLevel.CRITICAL
 
     def get_delay_factor(self) -> float:
-        """
-        获取延迟因子
-
-        Returns:
-            延迟因子（1.0 表示正常，>1.0 表示需要减速）
-        """
+        """获取延迟因子"""
         level = self.get_level()
         factors = {
             BackpressureLevel.NONE: 1.0,
@@ -490,16 +480,7 @@ def create_flow_controller(
     strategy: FlowControlStrategy = FlowControlStrategy.TOKEN_BUCKET,
     config: FlowControlConfig | None = None,
 ) -> FlowController:
-    """
-    创建流量控制器
-
-    Args:
-        strategy: 流量控制策略
-        config: 配置
-
-    Returns:
-        流量控制器实例
-    """
+    """创建流量控制器"""
     config = config or FlowControlConfig(strategy=strategy)
 
     if strategy == FlowControlStrategy.TOKEN_BUCKET:

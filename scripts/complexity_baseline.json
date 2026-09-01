@@ -1535,7 +1535,7 @@
       "path": "services/worker/src/antcode_worker/domain/events.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 514
+      "value": 474
     },
     {
       "path": "services/worker/src/antcode_worker/domain/events.py",
@@ -1679,7 +1679,7 @@
       "path": "services/worker/src/antcode_worker/logs/batch.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 392
+      "value": 380
     },
     {
       "path": "services/worker/src/antcode_worker/logs/batch.py",
@@ -1698,12 +1698,6 @@
       "function": "RealtimeSender.__init__",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "services/worker/src/antcode_worker/logs/streamer.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 316
     },
     {
       "path": "services/worker/src/antcode_worker/plugins/code/plugin.py",
@@ -1787,19 +1781,19 @@
       "path": "services/worker/src/antcode_worker/runtime/gc.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 542
+      "value": 537
     },
     {
       "path": "services/worker/src/antcode_worker/runtime/locks.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 473
+      "value": 397
     },
     {
       "path": "services/worker/src/antcode_worker/runtime/manager.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 398
+      "value": 330
     },
     {
       "path": "services/worker/src/antcode_worker/runtime/manager.py",
@@ -1823,7 +1817,7 @@
       "path": "services/worker/src/antcode_worker/security/identity.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 397
+      "value": 379
     },
     {
       "path": "services/worker/src/antcode_worker/security/identity.py",
@@ -1847,7 +1841,7 @@
       "path": "services/worker/src/antcode_worker/security/secrets.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 497
+      "value": 474
     },
     {
       "path": "services/worker/src/antcode_worker/security/secrets.py",
@@ -1937,7 +1931,7 @@
       "path": "services/worker/src/antcode_worker/transport/flow_control.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 512
+      "value": 493
     },
     {
       "path": "services/worker/src/antcode_worker/transport/flow_control.py",
@@ -1961,7 +1955,7 @@
       "path": "services/worker/src/antcode_worker/transport/gateway/reconnect.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 589
+      "value": 570
     },
     {
       "path": "services/worker/src/antcode_worker/transport/gateway/reconnect.py",
@@ -1997,7 +1991,7 @@
       "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 502
+      "value": 447
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/codecs.py",

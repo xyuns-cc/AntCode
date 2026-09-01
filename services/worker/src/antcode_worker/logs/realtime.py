@@ -73,15 +73,7 @@ class RealtimeSender:
         config: RealtimeConfig | None = None,
         on_send_failure: Callable[[LogEntry, str], None] | None = None,
     ):
-        """
-        初始化实时发送器
-
-        Args:
-            run_id: 运行 ID
-            transport: 传输层实例
-            config: 发送配置
-            on_send_failure: 发送失败回调
-        """
+        """初始化实时发送器"""
         self.run_id = run_id
         self._transport = transport
         self._config = config or RealtimeConfig()
@@ -129,16 +121,9 @@ class RealtimeSender:
         logger.info(f"[{self.run_id}] 实时发送器已停止")
 
     async def write(self, entry: LogEntry) -> bool:
-        """
-        发送日志条目
+        """发送日志条目
 
         实现 LogSink 协议。
-
-        Args:
-            entry: 日志条目
-
-        Returns:
-            是否发送成功
         """
         if not self._enabled or not self._running:
             logger.debug(f"[{self.run_id}] 实时发送跳过: enabled={self._enabled}, running={self._running}")
@@ -221,15 +206,7 @@ class RealtimeSender:
         return False
 
     def _build_log_message(self, entry: LogEntry) -> Any:
-        """
-        构建日志消息
-
-        Args:
-            entry: 日志条目
-
-        Returns:
-            Transport 可接受的日志消息格式
-        """
+        """构建日志消息"""
         # 使用 Transport 的 LogMessage 格式
         from antcode_worker.transport.base import LogMessage
 
@@ -267,12 +244,7 @@ class RealtimeSink:
     """
 
     def __init__(self, sender: RealtimeSender):
-        """
-        初始化
-
-        Args:
-            sender: 实时发送器
-        """
+        """初始化"""
         self._sender = sender
 
     async def write(self, entry: LogEntry) -> bool:

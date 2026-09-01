@@ -58,29 +58,12 @@ class MessageCodec(ABC):
 
     @abstractmethod
     def encode(self, obj: Any) -> dict[str, str]:
-        """
-        编码对象为 Redis Stream 消息格式
-
-        Args:
-            obj: 要编码的对象
-
-        Returns:
-            字符串键值对字典（Redis Stream 要求）
-        """
+        """编码对象为 Redis Stream 消息格式"""
         pass
 
     @abstractmethod
     def decode(self, data: dict[str, str], target_type: type[T]) -> T:
-        """
-        解码 Redis Stream 消息为对象
-
-        Args:
-            data: Redis Stream 消息数据
-            target_type: 目标类型
-
-        Returns:
-            解码后的对象
-        """
+        """解码 Redis Stream 消息为对象"""
         pass
 
 
@@ -95,12 +78,7 @@ class JsonCodec(MessageCodec):
     VERSION_FIELD: ClassVar[str] = "_schema_version"
 
     def __init__(self, version: SchemaVersion | None = None):
-        """
-        初始化编解码器
-
-        Args:
-            version: schema 版本，默认使用当前版本
-        """
+        """初始化编解码器"""
         self._version = version or SchemaVersion.current()
 
     @property
@@ -109,15 +87,7 @@ class JsonCodec(MessageCodec):
         return self._version
 
     def encode(self, obj: Any) -> dict[str, str]:
-        """
-        编码对象为 Redis Stream 消息格式
-
-        Args:
-            obj: 要编码的对象
-
-        Returns:
-            字符串键值对字典
-        """
+        """编码对象为 Redis Stream 消息格式"""
         try:
             # 转换为字典
             if is_dataclass(obj) and not isinstance(obj, type):
@@ -139,16 +109,7 @@ class JsonCodec(MessageCodec):
             raise CodecError(f"Failed to encode object: {e}") from e
 
     def decode(self, data: dict[str, str], target_type: type[T]) -> T:
-        """
-        解码 Redis Stream 消息为对象
-
-        Args:
-            data: Redis Stream 消息数据
-            target_type: 目标类型
-
-        Returns:
-            解码后的对象
-        """
+        """解码 Redis Stream 消息为对象"""
         try:
             # 解析字符串值
             parsed = self._string_dict_to_dict(data)
@@ -410,23 +371,7 @@ class HeartbeatCodec(JsonCodec):
         queue_depth: int = 0,
         extra: dict[str, Any] | None = None,
     ) -> dict[str, str]:
-        """
-        编码心跳消息
-
-        Args:
-            worker_id: Worker ID
-            status: 状态
-            cpu_percent: CPU 使用率
-            memory_percent: 内存使用率
-            disk_percent: 磁盘使用率
-            running_tasks: 运行中任务数
-            max_concurrent_tasks: 最大并发任务数
-            queue_depth: 队列深度
-            extra: 额外信息
-
-        Returns:
-            编码后的消息
-        """
+        """编码心跳消息"""
         data = {
             "worker_id": worker_id,
             "status": status,

@@ -66,12 +66,7 @@ class RuntimeManager:
     """
 
     def __init__(self, config: RuntimeManagerConfig):
-        """
-        初始化运行时管理器
-
-        Args:
-            config: 管理器配置
-        """
+        """初始化运行时管理器"""
         self.config = config
 
         # 确保目录存在
@@ -132,24 +127,10 @@ class RuntimeManager:
         force_rebuild: bool = False,
         wait_for_lock: bool = True,
     ) -> RuntimeHandle:
-        """
-        准备运行时环境
+        """准备运行时环境
 
         如果运行时已存在且有效，直接返回；否则构建新的运行时。
         使用锁确保同一 runtime_hash 只有一个构建进程。
-
-        Args:
-            spec: 运行时规格
-            force_rebuild: 是否强制重建
-            wait_for_lock: 是否等待锁
-
-        Returns:
-            RuntimeHandle 包含路径和哈希
-
-        Raises:
-            RuntimeError: 构建失败或获取锁失败
-
-        Requirements: 6.1
         """
         # 计算哈希
         runtime_hash = compute_runtime_hash(spec)
@@ -191,13 +172,9 @@ class RuntimeManager:
             return handle
 
     async def release(self, handle: RuntimeHandle) -> None:
-        """
-        释放运行时
+        """释放运行时
 
         更新最后使用时间，减少使用计数。
-
-        Args:
-            handle: 运行时句柄
         """
         runtime_hash = handle.runtime_hash
 
@@ -245,12 +222,7 @@ class RuntimeManager:
         return success
 
     async def list_runtimes(self) -> list[dict[str, Any]]:
-        """
-        列出所有运行时
-
-        Returns:
-            运行时信息列表
-        """
+        """列出所有运行时"""
         runtimes = await self._builder.list_runtimes()
 
         # 添加使用计数
@@ -279,45 +251,19 @@ class RuntimeManager:
         return None
 
     def exists(self, runtime_hash: str) -> bool:
-        """
-        检查运行时是否存在
-
-        Args:
-            runtime_hash: 运行时哈希
-
-        Returns:
-            是否存在
-        """
+        """检查运行时是否存在"""
         return self._builder.exists(runtime_hash)
 
     def is_in_use(self, runtime_hash: str) -> bool:
-        """
-        检查运行时是否正在使用
-
-        Args:
-            runtime_hash: 运行时哈希
-
-        Returns:
-            是否正在使用
-        """
+        """检查运行时是否正在使用"""
         return self._usage_count.get(runtime_hash, 0) > 0
 
     async def run_gc(self) -> dict[str, Any]:
-        """
-        手动触发垃圾回收
-
-        Returns:
-            GC 结果
-        """
+        """手动触发垃圾回收"""
         return dict(await self._gc.run_gc())
 
     def get_stats(self) -> dict[str, Any]:
-        """
-        获取统计信息
-
-        Returns:
-            统计信息字典
-        """
+        """获取统计信息"""
         gc_stats = self._gc.stats
         lock_stats = self._lock.get_stats()
 
@@ -365,21 +311,7 @@ async def create_runtime_manager(
     gc_policy: GCPolicy | None = None,
     auto_gc: bool = True,
 ) -> RuntimeManager:
-    """
-    创建并启动运行时管理器
-
-    Args:
-        venvs_dir: 虚拟环境目录
-        locks_dir: 锁目录
-        build_timeout: 构建超时
-        lock_timeout: 锁超时
-        uv_cache_dir: uv 缓存目录
-        gc_policy: GC 策略
-        auto_gc: 是否启用自动 GC
-
-    Returns:
-        运行时管理器实例
-    """
+    """创建并启动运行时管理器"""
     config = RuntimeManagerConfig(
         venvs_dir=venvs_dir,
         locks_dir=locks_dir,

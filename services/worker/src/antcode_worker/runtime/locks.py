@@ -55,13 +55,7 @@ class RuntimeLock:
         default_timeout: float = 600.0,
         cleanup_interval: float = 60.0,
     ):
-        """
-        初始化锁管理器
-
-        Args:
-            default_timeout: 默认锁超时时间（秒）
-            cleanup_interval: 清理过期锁的间隔（秒）
-        """
+        """初始化锁管理器"""
         self._locks: dict[str, asyncio.Lock] = {}
         self._lock_users: dict[str, int] = {}
         self._lock_info: dict[str, LockInfo] = {}
@@ -143,18 +137,7 @@ class RuntimeLock:
         *,
         wait: bool = True,
     ) -> bool:
-        """
-        获取锁
-
-        Args:
-            runtime_hash: 运行时哈希
-            holder_id: 持有者标识
-            timeout: 超时时间（秒）
-            wait: 是否等待锁
-
-        Returns:
-            是否成功获取锁
-        """
+        """获取锁"""
         lock = self._checkout_lock(runtime_hash)
         timeout = self._default_timeout if timeout is None else timeout
 
@@ -192,15 +175,7 @@ class RuntimeLock:
         return True
 
     async def release(self, runtime_hash: str) -> bool:
-        """
-        释放锁
-
-        Args:
-            runtime_hash: 运行时哈希
-
-        Returns:
-            是否成功释放
-        """
+        """释放锁"""
         lock = self._locks.get(runtime_hash)
         if not lock:
             return False
@@ -247,18 +222,7 @@ class RuntimeLock:
         *,
         wait: bool = True,
     ) -> AsyncGenerator[bool, None]:
-        """
-        锁上下文管理器
-
-        Args:
-            runtime_hash: 运行时哈希
-            holder_id: 持有者标识
-            timeout: 超时时间
-
-        Yields:
-            是否成功获取锁
-
-        """
+        """锁上下文管理器"""
         acquired = await self.acquire(runtime_hash, holder_id, timeout, wait=wait)
         try:
             yield acquired
@@ -283,14 +247,7 @@ class FileLock:
         default_timeout: float = 600.0,
         stale_timeout: float = 3600.0,
     ):
-        """
-        初始化文件锁管理器
-
-        Args:
-            locks_dir: 锁文件目录
-            default_timeout: 默认锁超时时间（秒）
-            stale_timeout: 过期锁清理时间（秒）
-        """
+        """初始化文件锁管理器"""
         self.locks_dir = locks_dir
         self._default_timeout = default_timeout
         self._stale_timeout = stale_timeout
@@ -308,17 +265,7 @@ class FileLock:
         holder_id: str = "",
         timeout: float | None = None,
     ) -> bool:
-        """
-        获取文件锁
-
-        Args:
-            runtime_hash: 运行时哈希
-            holder_id: 持有者标识
-            timeout: 超时时间
-
-        Returns:
-            是否成功获取锁
-        """
+        """获取文件锁"""
         lock_file = self._get_lock_file(runtime_hash)
         timeout = self._default_timeout if timeout is None else timeout
         start_time = time.time()
@@ -373,15 +320,7 @@ class FileLock:
             return True
 
     async def release(self, runtime_hash: str) -> bool:
-        """
-        释放文件锁
-
-        Args:
-            runtime_hash: 运行时哈希
-
-        Returns:
-            是否成功释放
-        """
+        """释放文件锁"""
         lock_file = self._get_lock_file(runtime_hash)
 
         try:
@@ -406,17 +345,7 @@ class FileLock:
         holder_id: str = "",
         timeout: float | None = None,
     ) -> AsyncGenerator[bool, None]:
-        """
-        文件锁上下文管理器
-
-        Args:
-            runtime_hash: 运行时哈希
-            holder_id: 持有者标识
-            timeout: 超时时间
-
-        Yields:
-            是否成功获取锁
-        """
+        """文件锁上下文管理器"""
         acquired = await self.acquire(runtime_hash, holder_id, timeout)
         try:
             yield acquired
@@ -425,12 +354,7 @@ class FileLock:
                 await self.release(runtime_hash)
 
     async def cleanup_stale_locks(self) -> int:
-        """
-        清理过期的锁文件
-
-        Returns:
-            清理的锁文件数量
-        """
+        """清理过期的锁文件"""
         cleaned = 0
 
         if not os.path.exists(self.locks_dir):

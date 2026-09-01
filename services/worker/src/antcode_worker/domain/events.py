@@ -144,15 +144,7 @@ class SignalManager:
         priority=0,
         weak=False,
     ):
-        """
-        连接信号处理器
-
-        Args:
-            signal: 信号类型
-            callback: 回调函数（支持同步/异步）
-            priority: 优先级（数字越大越先执行）
-            weak: 是否使用弱引用
-        """
+        """连接信号处理器"""
         if signal not in self._receivers:
             self._receivers[signal] = []
 
@@ -199,17 +191,7 @@ class SignalManager:
         sender=None,
         **kwargs,
     ):
-        """
-        发送信号
-
-        Args:
-            signal: 信号类型
-            sender: 发送者
-            **kwargs: 传递给处理器的参数
-
-        Returns:
-            所有处理器的返回值列表
-        """
+        """发送信号"""
         if signal in self._disabled_signals:
             return []
 
@@ -449,36 +431,19 @@ class EventBus:
         self._handlers: dict[type, list] = {}
 
     def subscribe(self, event_type: type, handler):
-        """
-        订阅事件
-
-        Args:
-            event_type: 事件类型
-            handler: 事件处理函数（同步或异步）
-        """
+        """订阅事件"""
         if event_type not in self._handlers:
             self._handlers[event_type] = []
         self._handlers[event_type].append(handler)
 
     def unsubscribe(self, event_type: type, handler):
-        """
-        取消订阅
-
-        Args:
-            event_type: 事件类型
-            handler: 事件处理函数
-        """
+        """取消订阅"""
         if event_type in self._handlers:
             with contextlib.suppress(ValueError):
                 self._handlers[event_type].remove(handler)
 
     async def publish(self, event: DomainEvent):
-        """
-        发布事件
-
-        Args:
-            event: 领域事件
-        """
+        """发布事件"""
         event_type = type(event)
         handlers = self._handlers.get(event_type, [])
 
@@ -493,12 +458,7 @@ class EventBus:
                 logger.error(f"Event handler error for {event_type.__name__}: {e}")
 
     def publish_sync(self, event: DomainEvent):
-        """
-        同步发布事件（仅调用同步处理器）
-
-        Args:
-            event: 领域事件
-        """
+        """同步发布事件（仅调用同步处理器）"""
         event_type = type(event)
         handlers = self._handlers.get(event_type, [])
 

@@ -237,12 +237,7 @@ class ReconnectManager:
             self._stats.current_attempt = 0
 
     async def reconnect(self) -> bool:
-        """
-        执行重连
-
-        Returns:
-            是否重连成功
-        """
+        """执行重连"""
         if not self._connect_func:
             logger.error("未设置连接函数")
             return False
@@ -305,15 +300,7 @@ class ReconnectManager:
             logger.error(f"重连成功回调异常: {exc}")
 
     async def wait_connected(self, timeout: float | None = None) -> bool:
-        """
-        等待连接
-
-        Args:
-            timeout: 超时时间（秒）
-
-        Returns:
-            是否已连接
-        """
+        """等待连接"""
         if self._state in {ReconnectState.FAILED, ReconnectState.STOPPED}:
             return False
         connected = asyncio.create_task(self._connected_event.wait())
@@ -370,13 +357,7 @@ class ReconnectManager:
         return True
 
     def complete_receipt(self, receipt_id: str, success: bool) -> None:
-        """
-        完成 receipt
-
-        Args:
-            receipt_id: Receipt ID
-            success: 是否成功
-        """
+        """完成 receipt"""
         if not self._config.enable_receipt_tracking:
             return
 

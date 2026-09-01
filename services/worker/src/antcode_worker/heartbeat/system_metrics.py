@@ -106,15 +106,7 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
         self._reconnect_count = 0
 
     async def collect(self, use_cache: bool = True) -> SystemMetrics:
-        """
-        采集系统指标
-
-        Args:
-            use_cache: 是否使用缓存
-
-        Returns:
-            系统指标
-        """
+        """采集系统指标"""
         now = time.time()
 
         # 检查缓存
@@ -170,12 +162,7 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
         return metrics
 
     def get_os_info(self) -> dict[str, str]:
-        """
-        获取操作系统信息
-
-        Returns:
-            操作系统信息字典
-        """
+        """获取操作系统信息"""
         return {
             "os_type": platform.system(),
             "os_version": platform.release(),

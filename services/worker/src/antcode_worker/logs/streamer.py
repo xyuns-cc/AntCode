@@ -67,14 +67,7 @@ class LogStreamer:
         sinks: list[LogSink] | None = None,
         on_entry: Callable[[LogEntry], None] | None = None,
     ):
-        """
-        初始化日志流式捕获器
-
-        Args:
-            run_id: 运行 ID
-            sinks: 日志接收器列表
-            on_entry: 日志条目回调
-        """
+        """初始化日志流式捕获器"""
         self.run_id = run_id
         self._sinks = sinks or []
         self._on_entry = on_entry
@@ -128,13 +121,7 @@ class LogStreamer:
         reader: asyncio.StreamReader,
         stream: LogStream,
     ) -> None:
-        """
-        捕获单个流
-
-        Args:
-            reader: 异步流读取器
-            stream: 流类型（stdout/stderr）
-        """
+        """捕获单个流"""
         self._running = True
 
         try:
@@ -160,13 +147,7 @@ class LogStreamer:
         stdout: asyncio.StreamReader,
         stderr: asyncio.StreamReader,
     ) -> None:
-        """
-        同时捕获 stdout 和 stderr
-
-        Args:
-            stdout: stdout 流读取器
-            stderr: stderr 流读取器
-        """
+        """同时捕获 stdout 和 stderr"""
         self._running = True
 
         stdout_task = asyncio.create_task(self.capture_stream(stdout, LogStream.STDOUT))
@@ -186,15 +167,10 @@ class LogStreamer:
             self._capture_tasks.clear()
 
     async def _process_line(self, content: str, stream: LogStream) -> None:
-        """
-        处理单行日志
+        """处理单行日志
 
         P2: 子进程 stdout/stderr 走 ``sanitize_log_message`` 脱敏后再发出去,
         避免 access token / API key / 密码 进入 ingest stream + PG。
-
-        Args:
-            content: 日志内容
-            stream: 流类型
         """
         if not content:
             return
@@ -231,12 +207,7 @@ class LogStreamer:
         await self._dispatch_to_sinks(entry)
 
     async def _dispatch_to_sinks(self, entry: LogEntry) -> None:
-        """
-        分发日志到所有 sink
-
-        Args:
-            entry: 日志条目
-        """
+        """分发日志到所有 sink"""
         for sink in self._sinks:
             try:
                 await sink.write(entry)
@@ -248,13 +219,7 @@ class LogStreamer:
         content: str,
         level: str = "INFO",
     ) -> None:
-        """
-        写入系统日志
-
-        Args:
-            content: 日志内容
-            level: 日志级别
-        """
+        """写入系统日志"""
         seq = await self._next_seq()
         entry = LogEntry(
             run_id=self.run_id,
