@@ -1,13 +1,4 @@
-"""
-传输层抽象基类
-
-定义 Worker 端传输层的抽象接口。
-支持两种模式：
-- Direct 模式：内网直连 Redis Streams
-- Gateway 模式：公网通过 Gateway gRPC/TLS 连接
-
-Requirements: 7.2, 11.3
-"""
+"""Worker 端传输层抽象接口：Direct（内网直连 Redis Streams）与 Gateway（公网 gRPC/TLS）。"""
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -24,15 +15,11 @@ from antcode_worker.transport.lease_cadence import ServerLeaseCadence
 
 
 class TransportMode(StrEnum):
-    """传输模式枚举"""
-
     DIRECT = "direct"  # 内网直连 Redis Streams
     GATEWAY = "gateway"  # 公网通过 Gateway gRPC
 
 
 class WorkerState(StrEnum):
-    """Worker 状态枚举"""
-
     WAITING = "waiting"  # 等待连接
     CONNECTING = "connecting"  # 正在连接
     REGISTERED = "registered"  # 已注册
@@ -42,8 +29,6 @@ class WorkerState(StrEnum):
 
 
 class ControlType(StrEnum):
-    """控制消息类型"""
-
     CANCEL = "cancel"
     KILL = "kill"
     CONFIG_UPDATE = "config_update"
@@ -52,9 +37,6 @@ class ControlType(StrEnum):
 
 @dataclass
 class ServerConfig:
-    """传输层配置"""
-
-    # 通用配置
     heartbeat_interval: int = 30
     reconnect_interval: int = 5
     max_reconnect_attempts: int = 10
@@ -115,8 +97,6 @@ class TaskMessage:
 
 @dataclass
 class TaskResult:
-    """任务结果"""
-
     run_id: str
     task_id: str
     status: str  # success, failed, cancelled, timeout
@@ -130,8 +110,6 @@ class TaskResult:
 
 @dataclass
 class HeartbeatMessage:
-    """心跳消息"""
-
     worker_id: str
     status: str = "online"
     cpu_percent: float = 0.0
@@ -145,8 +123,6 @@ class HeartbeatMessage:
 
 @dataclass
 class LogMessage:
-    """日志消息"""
-
     run_id: str
     log_type: str  # stdout, stderr
     content: str
@@ -156,8 +132,6 @@ class LogMessage:
 
 @dataclass
 class ControlMessage:
-    """控制消息"""
-
     control_type: str
     task_id: str = ""
     run_id: str = ""
@@ -167,21 +141,13 @@ class ControlMessage:
 
 
 class TransportBase(ServerLeaseCadence, ABC):
-    """
-    传输层抽象基类
-
-    定义 Worker 与 Gateway/Redis 之间通信的统一接口。
-    无论使用 Direct 模式还是 Gateway 模式，都提供一致的语义。
-
-    Requirements: 7.2, 11.3
-    """
+    """Worker 与 Gateway/Redis 通信的统一接口：两种模式对上层语义一致。"""
 
     def __init__(self, config: ServerConfig | None = None):
         self._config = config or ServerConfig()
         self._state = WorkerState.WAITING
         self._running = False
 
-        # 回调函数
         self._on_task_dispatch: Callable | None = None
         self._on_task_cancel: Callable | None = None
         self._on_config_update: Callable | None = None
@@ -191,23 +157,19 @@ class TransportBase(ServerLeaseCadence, ABC):
 
     @property
     def state(self) -> WorkerState:
-        """当前状态"""
         return self._state
 
     @property
     def is_running(self) -> bool:
-        """是否运行中"""
         return self._running
 
     @property
     def is_connected(self) -> bool:
-        """是否已连接"""
         return self._state == WorkerState.ONLINE
 
     @property
     @abstractmethod
     def mode(self) -> TransportMode:
-        """传输模式"""
         pass
 
     async def authoritative_now_ms(self) -> int:
@@ -219,58 +181,29 @@ class TransportBase(ServerLeaseCadence, ABC):
 
     @abstractmethod
     async def start(self) -> bool:
-        """
-        启动传输层
-
-        Returns:
-            是否启动成功
-        """
         pass
 
     @abstractmethod
     async def stop(self, grace_period: float = 5.0) -> None:
-        """
-        停止传输层
-
-        Args:
-            grace_period: 优雅关闭等待时间（秒）
-        """
         pass
 
-    # T7-B3b (P1-6): worker 优雅停机时主动 revoke lease 让 master 立即判死
-    # （不等 30s TTL）。默认 no-op；direct DEL lease key，gateway 发 RPC。
     async def deregister(self, reason: str = "shutdown") -> None:
-        """主动通知 master worker 下线。默认 no-op。"""
+        """主动通知 master 下线，让它立即判死而不必等 lease TTL 到期。
+
+        默认 no-op；direct 实现 DEL lease key，gateway 实现发 RPC。
+        """
         return
 
     # ==================== 任务操作 ====================
 
     @abstractmethod
     async def poll_task(self, timeout: float = 5.0) -> TaskMessage | None:
-        """
-        拉取任务
-
-        Args:
-            timeout: 超时时间（秒）
-
-        Returns:
-            任务消息，无任务返回 None
-        """
+        """拉取任务，无任务返回 None。"""
         pass
 
     @abstractmethod
     async def ack_task(self, task_id: str, accepted: bool, reason: str = "") -> bool:
-        """
-        确认任务
-
-        Args:
-            task_id: 任务回执或任务 ID
-            accepted: 是否接受
-            reason: 拒绝原因
-
-        Returns:
-            是否成功
-        """
+        """确认任务；``task_id`` 收任务回执或任务 ID 均可。"""
         pass
 
     @abstractmethod
@@ -284,29 +217,10 @@ class TransportBase(ServerLeaseCadence, ABC):
 
     @abstractmethod
     async def requeue_task(self, receipt: str, reason: str = "") -> bool:
-        """
-        重新入队任务
-
-        Args:
-            receipt: 任务回执
-            reason: 重新入队原因
-
-        Returns:
-            是否成功
-        """
         pass
 
     @abstractmethod
     async def report_result(self, result: TaskResult) -> bool:
-        """
-        上报任务结果
-
-        Args:
-            result: 任务结果
-
-        Returns:
-            是否成功
-        """
         pass
 
     @abstractmethod
@@ -331,28 +245,10 @@ class TransportBase(ServerLeaseCadence, ABC):
 
     @abstractmethod
     async def send_log(self, log: LogMessage) -> bool:
-        """
-        发送日志
-
-        Args:
-            log: 日志消息
-
-        Returns:
-            是否成功
-        """
         pass
 
     @abstractmethod
     async def send_log_batch(self, logs: list[LogMessage]) -> bool:
-        """
-        批量发送日志
-
-        Args:
-            logs: 日志列表
-
-        Returns:
-            是否成功
-        """
         pass
 
     # ==================== 心跳 / Lease 操作 ====================
@@ -430,28 +326,10 @@ class TransportBase(ServerLeaseCadence, ABC):
 
     @abstractmethod
     async def poll_control(self, timeout: float = 5.0) -> ControlMessage | None:
-        """
-        拉取控制消息
-
-        Args:
-            timeout: 超时时间（秒）
-
-        Returns:
-            控制消息或 None
-        """
         pass
 
     @abstractmethod
     async def ack_control(self, receipt: str) -> bool:
-        """
-        确认控制消息
-
-        Args:
-            receipt: 控制消息回执
-
-        Returns:
-            是否成功
-        """
         pass
 
     @abstractmethod
@@ -465,20 +343,7 @@ class TransportBase(ServerLeaseCadence, ABC):
         data: Any = None,
         error: str = "",
     ) -> bool:
-        """
-        回传控制结果
-
-        Args:
-            request_id: 请求标识
-            reply_stream: 回执 Stream
-            success: 是否成功
-            receipt: 原控制事件回执
-            data: 结果数据
-            error: 错误信息
-
-        Returns:
-            是否成功
-        """
+        """回传控制结果；``receipt`` 是原控制事件的回执。"""
         pass
 
     # ==================== 连接管理 ====================
@@ -490,37 +355,26 @@ class TransportBase(ServerLeaseCadence, ABC):
     # ==================== 回调注册 ====================
 
     def on_task_dispatch(self, callback: Callable) -> None:
-        """注册任务分发回调"""
         self._on_task_dispatch = callback
 
     def on_task_cancel(self, callback: Callable) -> None:
-        """注册任务取消回调"""
         self._on_task_cancel = callback
 
     def on_config_update(self, callback: Callable) -> None:
-        """注册配置更新回调"""
         self._on_config_update = callback
 
     def on_state_change(self, callback: Callable) -> None:
-        """注册状态变更回调"""
         self._on_state_change = callback
 
     # ==================== 状态管理 ====================
 
     async def _set_state(self, new_state: WorkerState) -> None:
-        """
-        设置状态
-
-        Args:
-            new_state: 新状态
-        """
         old_state = self._state
         if old_state == new_state:
             return
 
         self._state = new_state
 
-        # 触发状态变更回调
         if self._on_state_change:
             try:
                 import asyncio
@@ -535,10 +389,4 @@ class TransportBase(ServerLeaseCadence, ABC):
 
     @abstractmethod
     def get_status(self) -> dict[str, Any]:
-        """
-        获取传输层状态
-
-        Returns:
-            状态信息字典
-        """
         pass

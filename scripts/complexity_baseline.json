@@ -1919,7 +1919,7 @@
       "path": "services/worker/src/antcode_worker/transport/base.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 544
+      "value": 392
     },
     {
       "path": "services/worker/src/antcode_worker/transport/factory.py",
@@ -2034,12 +2034,6 @@
       "function": "_decode_message",
       "rule": "PLR2004",
       "value": 1
-    },
-    {
-      "path": "services/worker/src/antcode_worker/transport/redis/keys.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 481
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/keys.py",
