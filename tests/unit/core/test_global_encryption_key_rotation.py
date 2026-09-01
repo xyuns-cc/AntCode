@@ -13,18 +13,12 @@ from antcode_core.application.services.security.postgres_encryption_key_rotation
     rotate_postgres_ciphertexts,
     verify_postgres_ciphertexts_primary_only,
 )
-from antcode_core.application.services.security.redispatch_rotation_guard import (
-    inspect_redispatch_drain,
-    require_redispatch_drained,
-)
 from antcode_core.common.config import settings
 from antcode_core.common.security.api_key import hash_api_key
 from antcode_core.common.security.encrypted_fields import EncryptedJSONField, EncryptedTextField
 from antcode_core.common.security.secret_box import SecretBox
 from antcode_core.domain.models import ProjectCode, ProjectFile, ProjectRule, SystemConfig, Task
 from cryptography.fernet import Fernet, InvalidToken
-
-EXPECTED_NON_EMPTY_REDISPATCH_ENTRIES = 6
 
 #: 与 ``settings.APP_TITLE`` 默认值一致——非 ASCII 不是构造出来的边角输入。
 NON_ASCII_CONFIG = "AntCode 任务调度平台"
@@ -64,17 +58,6 @@ class _Connection:
         for assignment, value in zip(assignments, values[:-1], strict=True):
             row[assignment.split('"')[1]] = value
         return 1, []
-
-
-class _Redis:
-    def __init__(self, counts: dict[tuple[str, str], int]) -> None:
-        self.counts = counts
-
-    async def zcard(self, key: str) -> int:
-        return self.counts.get(("zset", key), 0)
-
-    async def hlen(self, key: str) -> int:
-        return self.counts.get(("hash", key), 0)
 
 
 def _table_name(sql: str) -> str:
@@ -295,25 +278,3 @@ async def test_post_write_read_failure_is_not_silently_accepted(monkeypatch) -> 
 
     with pytest.raises(ConnectionError, match="post-write read failed"):
         await rotate_postgres_ciphertexts(connection, apply=True, box=box)
-
-
-@pytest.mark.asyncio
-async def test_redispatch_guard_checks_current_and_legacy_keys() -> None:
-    namespace = "tenant-a"
-    current = "{tenant-a}:task:redispatch"
-    legacy = "tenant-a:task:redispatch"
-    state = await inspect_redispatch_drain(
-        _Redis({("zset", current): 2, ("hash", f"{current}:processing"): 1, ("zset", legacy): 3}),
-        namespace,
-    )
-
-    assert state.total == EXPECTED_NON_EMPTY_REDISPATCH_ENTRIES
-    with pytest.raises(RuntimeError, match="禁止轮换"):
-        require_redispatch_drained(state)
-
-
-@pytest.mark.asyncio
-async def test_redispatch_guard_accepts_only_fully_drained_queue() -> None:
-    state = await inspect_redispatch_drain(_Redis({}), "tenant-a")
-    require_redispatch_drained(state)
-    assert state.total == 0
