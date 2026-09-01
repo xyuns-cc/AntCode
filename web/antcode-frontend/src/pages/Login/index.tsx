@@ -56,10 +56,6 @@ const Login: React.FC = () => {
       return undefined
     }
 
-    // 一次性清理历史密码存储(升级前的用户仍可能有残留)
-    localStorage.removeItem(STORAGE_KEYS.REMEMBER_PASSWORD)
-    localStorage.removeItem('remember_password')  // 兜底清老 key
-
     const username = (localStorage.getItem(STORAGE_KEYS.REMEMBER_USERNAME) || '').trim()
 
     if (!isValidRememberedUsername(username)) {
@@ -103,9 +99,6 @@ const Login: React.FC = () => {
         localStorage.removeItem(STORAGE_KEYS.REMEMBER_ME)
         localStorage.removeItem(STORAGE_KEYS.REMEMBER_USERNAME)
       }
-      // 无论选没选记住我,一律清理历史密码存储
-      localStorage.removeItem(STORAGE_KEYS.REMEMBER_PASSWORD)
-
       await login({ username: values.username.trim(), password: values.password })
       navigate(AuthHandler.getRedirectPath(), { replace: true })
     } catch (error) {

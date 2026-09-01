@@ -144,10 +144,6 @@ class AdminUserRoleUpdateRequest(BaseModel):
         return self
 
 
-# 兼容旧命名，避免下游引用突然断裂；新代码请直接用 AdminUserRoleUpdateRequest
-UserRoleUpdateRequest = AdminUserRoleUpdateRequest
-
-
 class UserPasswordUpdateRequest(PasswordEnvelopeFields):
     """用户密码更新请求。
 
@@ -276,7 +272,6 @@ __all__ = [
     "UserCreateRequest",
     "UserUpdateRequest",
     "AdminUserRoleUpdateRequest",
-    "UserRoleUpdateRequest",
     "UserPasswordUpdateRequest",
     "UserAdminPasswordUpdateRequest",
     "UserBatchStatusRequest",

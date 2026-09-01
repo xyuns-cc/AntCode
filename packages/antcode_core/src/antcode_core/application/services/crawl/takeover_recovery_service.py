@@ -41,19 +41,6 @@ class TakeoverRecoveryReport:
     failures: tuple[str, ...] = ()
 
 
-class TakeoverRecoveryError(RuntimeError):
-    """接管恢复未完整完成。
-
-    C1: ``recover()`` 不再抛出本异常——恢复失败会记录到
-    ``TakeoverRecoveryReport.failures`` 并留待后续重试，避免单个
-    顽固失败的批次导致全集群无 Leader。类保留用于向后兼容。
-    """
-
-    def __init__(self, report: TakeoverRecoveryReport):
-        self.report = report
-        super().__init__("Leader 接管恢复失败: " + "; ".join(report.failures))
-
-
 class TakeoverRecovery(Protocol):
     async def recover(self) -> TakeoverRecoveryReport: ...
 

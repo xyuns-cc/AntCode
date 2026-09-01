@@ -58,8 +58,5 @@ export const STORAGE_KEYS = {
   REFRESH_TOKEN: 'refresh_token',
   USER_INFO: 'user_info',
   REMEMBER_USERNAME: 'remember_username',
-  // P1-07: REMEMBER_PASSWORD 常量保留仅为兼容清理旧值(Login/index.tsx 会 removeItem 旧 key),
-  // 严禁再用来写入密码。前端已删除所有 SetItem 调用。
-  REMEMBER_PASSWORD: 'remember_password',
   REMEMBER_ME: 'remember_me',
 } as const

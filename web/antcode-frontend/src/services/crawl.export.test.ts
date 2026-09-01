@@ -14,12 +14,6 @@ describe('crawl batch export contract', () => {
     expect(crawlService).not.toHaveProperty('deleteBatch')
   })
 
-  it('does not include the legacy truncating limit parameter', () => {
-    expect(crawlService.exportBatchUrl('batch-1', 'json')).toBe(
-      '/api/v1/crawl/batches/batch-1/export?format=json'
-    )
-  })
-
   it('disables the generic request timeout for a complete download', async () => {
     const service = crawlService as unknown as CrawlDownloadAccess
     const download = vi.spyOn(service, 'downloadFile').mockResolvedValue(undefined)

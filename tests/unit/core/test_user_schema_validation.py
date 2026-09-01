@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 from antcode_core.domain.schemas.user import (
+    AdminUserRoleUpdateRequest,
     UserCreateRequest,
-    UserRoleUpdateRequest,
     UserUpdateRequest,
 )
 from pydantic import ValidationError
@@ -109,8 +109,8 @@ def test_user_update_profile_fields_allowed():
 
 
 def test_user_role_update_request_strict():
-    req = UserRoleUpdateRequest(old_role="admin", new_role="super_admin")
+    req = AdminUserRoleUpdateRequest(old_role="admin", new_role="super_admin")
     assert req.old_role == "admin"
     assert req.new_role == "super_admin"
     with pytest.raises(ValidationError):
-        UserRoleUpdateRequest(old_role="admin", new_role="invalid")
+        AdminUserRoleUpdateRequest(old_role="admin", new_role="invalid")

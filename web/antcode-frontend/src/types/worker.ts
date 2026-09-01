@@ -9,8 +9,7 @@ export type SnapshotErrorReason = 'field_mismatch' | 'not_an_object'
 // Worker 自报列读回失败详情（后端 worker_snapshot.py 的 WorkerSnapshotError）
 export interface WorkerSnapshotError {
   column: string
-  // 老后端不带此字段；缺省按"字段漂移"处理，与它当时唯一能产出的那种失败一致。
-  reason?: SnapshotErrorReason
+  reason: SnapshotErrorReason
   keys: string[]
   message: string
 }

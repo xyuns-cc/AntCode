@@ -1544,12 +1544,6 @@
       "value": 4
     },
     {
-      "path": "services/worker/src/antcode_worker/domain/models.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 309
-    },
-    {
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -1775,7 +1769,7 @@
       "path": "services/worker/src/antcode_worker/runtime/builder.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 437
+      "value": 431
     },
     {
       "path": "services/worker/src/antcode_worker/runtime/builder.py",
@@ -2087,7 +2081,7 @@
       "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1348
+      "value": 1344
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/transport.py",

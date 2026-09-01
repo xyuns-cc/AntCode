@@ -369,14 +369,6 @@ class ResultLoop:
             return
         await scheduler_service._schedule_retry(task, execution)
 
-    # E1: 已弃用本地映射，改用 antcode_contracts.transcode.proto_status_to_str。
-    # 旧方法保留兼容旧测试导入，转发到权威实现。
-    @staticmethod
-    def _proto_status_to_str(status_name: str) -> str:
-        if status_name.startswith("STATUS_"):
-            return status_name[len("STATUS_") :].lower()
-        return status_name.lower()
-
     async def _should_dead_letter(self, msg_id: str) -> bool:
         """判断单条消息的 deliver_count 是否已经超过阈值。
 

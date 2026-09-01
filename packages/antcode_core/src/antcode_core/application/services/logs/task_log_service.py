@@ -22,7 +22,6 @@ from antcode_core.application.services.logs.log_sequence_allocator import (
 from antcode_core.application.services.logs.postgres_log_service import (
     PostgresLogEntry,
     postgres_log_service,
-    postgres_task_log_service,  # 兼容旧 import 名
 )
 from antcode_core.application.services.logs.task_log_readers import (
     LOG_TRUNCATED_MARKER,
@@ -50,8 +49,7 @@ def _join_bounded(contents: list[str]) -> str:
     return collector.texts()[0]
 
 
-# 兼容旧 ``from .task_log_service import postgres_task_log_service`` 引用
-__all__ = ["TaskLogService", "task_log_service", "postgres_task_log_service"]
+__all__ = ["TaskLogService", "task_log_service"]
 
 
 class TaskLogService:
