@@ -12,12 +12,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from antcode_contracts.wire_contract import (
-    LEGACY_WIRE_CONTRACT_VERSION,
-    MIN_SUPPORTED_WORKER_WIRE_CONTRACT,
     WIRE_CONTRACT_CAPABILITY,
     WORKER_WIRE_CONTRACT_VERSION,
     WorkerWireContractError,
-    declared_wire_contract,
     require_supported_wire_contract,
     wire_contract_capability,
 )
@@ -43,25 +40,21 @@ def _allowing_authorizer() -> AsyncMock:
     return AsyncMock(return_value=SimpleNamespace(allowed=True, reason=""))
 
 
-def test_missing_capability_is_read_as_the_legacy_contract() -> None:
-    assert declared_wire_contract(LEGACY_WORKER_CAPABILITIES) == LEGACY_WIRE_CONTRACT_VERSION
-    assert declared_wire_contract(None) == LEGACY_WIRE_CONTRACT_VERSION
+def test_snapshot_without_the_capability_is_rejected_with_an_actionable_reason() -> None:
+    for capabilities in (LEGACY_WORKER_CAPABILITIES, None):
+        with pytest.raises(WorkerWireContractError) as exc:
+            require_supported_wire_contract(capabilities)
 
-
-def test_legacy_worker_snapshot_is_rejected_with_an_actionable_reason() -> None:
-    with pytest.raises(WorkerWireContractError) as exc:
-        require_supported_wire_contract(LEGACY_WORKER_CAPABILITIES)
-
-    message = str(exc.value)
-    assert f"v{LEGACY_WIRE_CONTRACT_VERSION}" in message
-    assert f"v{MIN_SUPPORTED_WORKER_WIRE_CONTRACT}" in message
-    # 排障者必须能从这一行知道"要做什么"，而不是只知道"被拒了"。
-    assert "升级" in message
+        message = str(exc.value)
+        assert WIRE_CONTRACT_CAPABILITY in message
+        assert f"v{WORKER_WIRE_CONTRACT_VERSION}" in message
+        # 排障者必须能从这一行知道"要做什么"，而不是只知道"被拒了"。
+        assert "升级" in message
 
 
 def test_newer_worker_than_the_control_plane_is_rejected_too() -> None:
-    """双向门禁：本版本控制面也要挡住下一版本的 Worker，否则错配只是换了个方向。"""
-    with pytest.raises(WorkerWireContractError, match="高于控制面"):
+    """精确比对是双向的：本版本控制面也要挡住下一版本的 Worker。"""
+    with pytest.raises(WorkerWireContractError, match="不匹配"):
         require_supported_wire_contract({WIRE_CONTRACT_CAPABILITY: FUTURE_CONTRACT_VERSION})
 
 
@@ -77,7 +70,7 @@ def test_current_contract_is_accepted() -> None:
 
 def test_worker_without_structured_runtime_failure_codes_is_rejected() -> None:
     """本轮 wire 断裂：失败回包必须带 error_code，上一版 Worker 拿不到 Lease。"""
-    with pytest.raises(WorkerWireContractError, match="过旧"):
+    with pytest.raises(WorkerWireContractError, match="不匹配"):
         require_supported_wire_contract({WIRE_CONTRACT_CAPABILITY: CODELESS_RUNTIME_FAILURE_CONTRACT_VERSION})
 
 
