@@ -43,9 +43,10 @@ describe('snapshotErrorTooltip', () => {
     expect(tooltip).toContain('gpuUtilization')
   })
 
-  it('控制组：老后端不带 reason 时沿用原文案，不冒充结构故障', () => {
+  it('field_mismatch 用 schema 措辞，不冒充结构故障', () => {
     const tooltip = snapshotErrorTooltip({
       column: 'capabilities',
+      reason: 'field_mismatch',
       keys: ['unknownFutureCapability'],
       message: 'unknownFutureCapability: Extra inputs are not permitted'
     })

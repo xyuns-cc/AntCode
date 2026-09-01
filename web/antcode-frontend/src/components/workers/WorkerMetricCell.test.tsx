@@ -44,7 +44,12 @@ describe('renderMetricCell', () => {
       ...BASE_WORKER,
       metrics: null,
       snapshotErrors: [
-        { column: 'metrics', keys: [UNKNOWN_KEY], message: `${UNKNOWN_KEY}: Extra inputs are not permitted` }
+        {
+          column: 'metrics',
+          reason: 'field_mismatch',
+          keys: [UNKNOWN_KEY],
+          message: `${UNKNOWN_KEY}: Extra inputs are not permitted`
+        }
       ]
     })
 
