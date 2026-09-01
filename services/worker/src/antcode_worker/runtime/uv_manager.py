@@ -663,4 +663,3 @@ uv_manager = UVManager()
 
 
 # 公开的名称白名单校验入口，供 API 层复用
-validate_env_name = _validate_env_name

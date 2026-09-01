@@ -355,11 +355,6 @@ def get_current_user_id(current_user: TokenData = Depends(get_current_user)) -> 
     return current_user.user_id
 
 
-def get_current_user_from_token(token: str) -> TokenData:
-    """从令牌获取用户（同步）"""
-    return jwt_auth.verify_token(token)
-
-
 async def verify_refresh_token(token: str) -> TokenData:
     """验证 refresh JWT 及其服务端 UserSession jti。"""
     # 1) 先做 JWT 结构 / exp / type 校验 (复用现成路径)

@@ -185,7 +185,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/metrics_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 630
+      "value": 608
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/metrics_service.py",
@@ -215,7 +215,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 864
+      "value": 858
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
@@ -293,7 +293,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 593
+      "value": 568
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
@@ -306,12 +306,6 @@
       "function": "WorkerRegistryService.heartbeat",
       "rule": "POSITIONAL_ARGS",
       "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/worker_service.py",
-      "function": "create_worker_registry_service",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/lease_service.py",
@@ -749,7 +743,7 @@
       "path": "packages/antcode_core/src/antcode_core/common/security/auth.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 524
+      "value": 519
     },
     {
       "path": "packages/antcode_core/src/antcode_core/common/security/auth.py",
@@ -857,7 +851,7 @@
       "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/client.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 338
+      "value": 302
     },
     {
       "path": "packages/antcode_core/src/antcode_core/infrastructure/redis/locks.py",
@@ -983,7 +977,7 @@
       "path": "services/gateway/src/antcode_gateway/server.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 471
+      "value": 465
     },
     {
       "path": "services/gateway/src/antcode_gateway/server.py",
@@ -1181,7 +1175,7 @@
       "path": "services/web_api/src/antcode_web_api/middleware/middleware.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 376
+      "value": 364
     },
     {
       "path": "services/web_api/src/antcode_web_api/middleware/middleware.py",
@@ -1191,21 +1185,9 @@
     },
     {
       "path": "services/web_api/src/antcode_web_api/response.py",
-      "function": "execution_list",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/response.py",
       "function": "page",
       "rule": "POSITIONAL_ARGS",
       "value": 6
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/response.py",
-      "function": "task_list",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/alert.py",
@@ -1595,7 +1577,7 @@
       "path": "services/worker/src/antcode_worker/config.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 641
+      "value": 625
     },
     {
       "path": "services/worker/src/antcode_worker/config.py",
@@ -1937,7 +1919,7 @@
       "path": "services/worker/src/antcode_worker/runtime/uv_manager.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 666
+      "value": 665
     },
     {
       "path": "services/worker/src/antcode_worker/runtime/uv_manager.py",
@@ -2226,12 +2208,6 @@
       "function": "RedisTransport._dead_letter_bad_task_frame",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "services/worker/src/antcode_worker/utils/time.py",
-      "function": "format_duration",
-      "rule": "PLR2004",
-      "value": 3
     },
     {
       "path": "tests/boundary/test_browser_feature_removal.py",

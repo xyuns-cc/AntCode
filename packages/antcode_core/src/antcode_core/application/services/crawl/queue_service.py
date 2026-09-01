@@ -151,12 +151,6 @@ class TaskStatusError(CrawlError):
     pass
 
 
-class InvalidStatusTransitionError(TaskStatusError):
-    """无效的状态转换"""
-
-    pass
-
-
 class CrawlQueueService(BaseService):
     """多优先级队列服务
 

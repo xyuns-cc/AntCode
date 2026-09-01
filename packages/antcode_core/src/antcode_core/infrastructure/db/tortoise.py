@@ -112,13 +112,6 @@ def _create_ssl_context(ssl_mode: str, root_cert: str) -> ssl.SSLContext:
     return context
 
 
-def _parse_bool_env(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None or value == "":
-        return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
-
-
 def _resolve_pool_size(
     service: str | None,
     min_connections: int | None,

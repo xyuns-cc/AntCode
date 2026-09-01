@@ -606,25 +606,3 @@ class CrawlMetricsService(BaseService):
 
 # 全局服务实例
 crawl_metrics_service = CrawlMetricsService()
-
-
-def create_metrics_service(
-    backend=None,
-    dedup_store: DedupStore | None = None,
-    alert_config: AlertConfig | None = None,
-) -> CrawlMetricsService:
-    """创建监控指标服务实例
-
-    Args:
-        backend: 队列后端
-        dedup_store: 去重存储后端
-        alert_config: 告警配置
-
-    Returns:
-        CrawlMetricsService 实例
-    """
-    return CrawlMetricsService(
-        backend=backend,
-        dedup_store=dedup_store,
-        alert_config=alert_config,
-    )

@@ -45,11 +45,3 @@ class Tracer:
 
 # 全局追踪器
 _tracer: Tracer | None = None
-
-
-def get_tracer() -> Tracer:
-    """获取全局追踪器"""
-    global _tracer
-    if _tracer is None:
-        _tracer = Tracer(enabled=False)
-    return _tracer

@@ -463,9 +463,3 @@ def get_grpc_server() -> GrpcServer:
     if _grpc_server is None:
         _grpc_server = GrpcServer()
     return _grpc_server
-
-
-def reset_grpc_server() -> None:
-    """重置全局 gRPC 服务器实例（用于测试）"""
-    global _grpc_server
-    _grpc_server = None

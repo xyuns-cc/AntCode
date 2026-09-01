@@ -116,4 +116,3 @@ class BaseService:
 
 
 # 全局查询辅助实例
-query_helper = QueryHelper()

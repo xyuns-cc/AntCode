@@ -85,19 +85,6 @@ class PluginError(WorkerError):
         self.plugin_name = plugin_name
 
 
-class ConfigError(WorkerError):
-    """配置错误"""
-
-    def __init__(
-        self,
-        message: str,
-        config_key: str | None = None,
-        details: dict[str, Any] | None = None,
-    ):
-        super().__init__(message, code="CONFIG_ERROR", details=details)
-        self.config_key = config_key
-
-
 class TimeoutError(ExecutionError):
     """超时错误"""
 

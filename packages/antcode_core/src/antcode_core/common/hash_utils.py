@@ -84,29 +84,6 @@ def calculate_content_hash(
     return hashlib.new(algorithm, content).hexdigest()
 
 
-def verify_file_hash(
-    file_path: str | Path,
-    expected_hash: str,
-    algorithm: HashAlgorithm = "sha256",
-) -> bool:
-    """
-    验证文件哈希值是否匹配
-
-    Args:
-        file_path: 文件路径
-        expected_hash: 期望的哈希值
-        algorithm: 哈希算法
-
-    Returns:
-        哈希值是否匹配
-    """
-    try:
-        actual_hash = calculate_file_hash(file_path, algorithm)
-        return actual_hash.lower() == expected_hash.lower()
-    except (FileNotFoundError, PermissionError):
-        return False
-
-
 def create_hash_calculator(algorithm: HashAlgorithm = "md5"):
     """
     创建哈希计算器实例

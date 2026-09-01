@@ -6,9 +6,8 @@ import os
 import re
 import uuid
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import ClassVar
 
-from antcode_core.common.logging import sanitize_dict
 from antcode_core.common.security.network_source import extract_client_ip
 from fastapi import HTTPException, Request, status
 from fastapi.middleware import Middleware
@@ -41,17 +40,6 @@ def get_client_ip(request: Request) -> str:
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-
-def safe_sanitize_body(body: Any) -> Any:
-    """对将要写入访问日志的请求/响应 body 做敏感字段脱敏。
-
-    复用 ``antcode_core.common.logging.sanitize_dict``,对常见的 ``api_key``、
-    ``password``、``token`` 等键值做 ``***REDACTED***`` 替换;非 dict 直接返回。
-    """
-    if isinstance(body, dict):
-        return sanitize_dict(body)
-    return body
 
 
 # ============================================================================

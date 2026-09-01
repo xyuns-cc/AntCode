@@ -21,17 +21,6 @@ from antcode_worker.services.credential.registration_intent import (
 ENV_PREFIX = "WORKER_CREDENTIAL_"
 
 # 凭证字段与环境变量的映射
-CREDENTIAL_ENV_MAPPING = {
-    "worker_id": f"{ENV_PREFIX}WORKER_ID",
-    "api_key": f"{ENV_PREFIX}API_KEY",
-    "secret_key": f"{ENV_PREFIX}SECRET_KEY",
-    "gateway_host": f"{ENV_PREFIX}GATEWAY_HOST",
-    "gateway_port": f"{ENV_PREFIX}GATEWAY_PORT",
-    "redis_username": f"{ENV_PREFIX}REDIS_USERNAME",
-    "redis_password": f"{ENV_PREFIX}REDIS_PASSWORD",
-    "registration_id": f"{ENV_PREFIX}REGISTRATION_ID",
-    "registered_at": f"{ENV_PREFIX}REGISTERED_AT",
-}
 
 
 class EnvCredentialStore(CredentialStore):

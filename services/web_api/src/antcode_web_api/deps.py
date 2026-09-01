@@ -71,7 +71,6 @@ async def get_current_admin_user(current_user: Annotated[User, Depends(get_curre
 
 
 # 类型别名，方便使用
-CurrentUser = Annotated[User, Depends(get_current_user)]
 CurrentAdminUser = Annotated[User, Depends(get_current_admin_user)]
 
 

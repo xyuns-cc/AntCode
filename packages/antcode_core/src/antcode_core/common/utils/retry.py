@@ -7,12 +7,8 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import random
-from collections.abc import Awaitable, Callable
 from typing import ParamSpec, TypeVar
-
-from loguru import logger
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -31,58 +27,6 @@ def _compute_backoff(attempt: int, base_delay: float, max_delay: float) -> float
     """指数退避 + [0.5, 1.5) 倍随机 jitter，避免雪崩。"""
     delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
     return delay * (0.5 + random.random())
-
-
-def async_retry(
-    *,
-    exceptions: tuple[type[BaseException], ...] = (Exception,),
-    max_attempts: int = 3,
-    base_delay: float = 0.5,
-    max_delay: float = 10.0,
-    log_prefix: str = "",
-) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
-    """异步函数重试装饰器。
-
-    Args:
-        exceptions: 要重试的异常类型（默认所有 Exception，一般应窄化到网络类）
-        max_attempts: 最大尝试次数（包含首次），默认 3
-        base_delay: 首次退避秒数，默认 0.5s（下一次 1s、2s...）
-        max_delay: 单次退避上限，默认 10s
-        log_prefix: 日志前缀，方便定位
-
-    Note:
-        ``asyncio.CancelledError`` 永远不重试，直接向上抛。
-    """
-
-    def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-        @functools.wraps(func)
-        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            last_error: BaseException | None = None
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    return await func(*args, **kwargs)
-                except asyncio.CancelledError:
-                    raise
-                except exceptions as exc:
-                    last_error = exc
-                    if attempt >= max_attempts:
-                        break
-                    delay = _compute_backoff(attempt, base_delay, max_delay)
-                    logger.warning(
-                        "{}第 {}/{} 次失败: {!r}，{:.2f}s 后重试",
-                        f"[{log_prefix}] " if log_prefix else "",
-                        attempt,
-                        max_attempts,
-                        exc,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-            assert last_error is not None
-            raise RetryError(max_attempts, last_error) from last_error
-
-        return wrapper
-
-    return decorator
 
 
 async def sleep_with_backoff(attempt: int, base_delay: float = 1.0, max_delay: float = 60.0) -> None:

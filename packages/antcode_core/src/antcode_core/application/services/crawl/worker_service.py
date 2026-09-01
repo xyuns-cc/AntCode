@@ -566,28 +566,3 @@ class WorkerRegistryService:
 
 
 # 全局服务实例
-worker_registry_service = WorkerRegistryService()
-
-
-def create_worker_registry_service(
-    heartbeat_ttl: int = DEFAULT_HEARTBEAT_TTL,
-    offline_threshold: int = DEFAULT_OFFLINE_THRESHOLD,
-    cleanup_interval: int = DEFAULT_CLEANUP_INTERVAL,
-    redis_client: object | None = None,
-) -> WorkerRegistryService:
-    """创建 Worker 注册服务实例
-
-    Args:
-        heartbeat_ttl: 心跳过期时间（秒）
-        offline_threshold: 离线判定阈值（秒）
-        cleanup_interval: 清理检查间隔（秒）
-
-    Returns:
-        WorkerRegistryService 实例
-    """
-    return WorkerRegistryService(
-        heartbeat_ttl=heartbeat_ttl,
-        offline_threshold=offline_threshold,
-        cleanup_interval=cleanup_interval,
-        redis_client=redis_client,
-    )

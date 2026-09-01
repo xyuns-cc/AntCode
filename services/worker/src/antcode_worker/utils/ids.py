@@ -35,23 +35,6 @@ def generate_trace_id() -> str:
     return uuid.uuid4().hex
 
 
-def generate_seq() -> int:
-    """
-    生成本地序列号（单调递增）
-
-    每秒重置，保证同一秒内单调递增
-    """
-    global _seq_counter, _seq_timestamp
-
-    with _seq_lock:
-        current_ts = int(time.time())
-        if current_ts != _seq_timestamp:
-            _seq_timestamp = current_ts
-            _seq_counter = 0
-        _seq_counter += 1
-        return _seq_counter
-
-
 def generate_worker_id() -> str:
     """
     生成 Worker ID

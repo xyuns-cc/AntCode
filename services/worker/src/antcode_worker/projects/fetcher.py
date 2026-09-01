@@ -22,7 +22,6 @@ from urllib.parse import urlparse
 from antcode_worker.artifact_transfer import SourceBundleDownload
 from antcode_worker.projects.workspace_gc import cleanup_stale_workspaces, remove_run_workspace
 
-SOURCE_BUNDLE_METHOD = "source_bundle"
 PGARTIFACT_SCHEME = "pgartifact"
 SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024

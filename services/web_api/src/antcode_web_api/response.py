@@ -75,20 +75,6 @@ def page(items, total, page, size, message=Messages.QUERY_SUCCESS, code=Response
     )
 
 
-def task_list(total, page_num, size, items):
-    """构建任务列表响应"""
-    from antcode_core.domain.schemas.task import TaskListResponse
-
-    return TaskListResponse(total=total, page=page_num, size=size, items=list(items))
-
-
-def execution_list(total, page_num, size, items):
-    """构建执行记录列表响应"""
-    from antcode_core.domain.schemas.task import TaskRunListResponse
-
-    return TaskRunListResponse(total=total, page=page_num, size=size, items=list(items))
-
-
 # ============================================================================
 # 响应构建器辅助函数
 # ============================================================================

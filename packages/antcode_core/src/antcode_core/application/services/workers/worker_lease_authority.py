@@ -24,7 +24,6 @@ from antcode_core.infrastructure.redis import worker_heartbeat_key
 # 字段相互独立，``store.grant`` 仍会被它拦下。
 # 也不会造成双跑：回归的 Worker 拿到的是**新的 Lease 代际**，旧代际的结果会被
 # fencing token 拒绝——这正是 Lease 代际机制存在的意义。
-LEASE_INELIGIBLE_STATUSES = frozenset({WorkerStatus.MAINTENANCE.value})
 LEASE_ELIGIBLE_STATUSES = frozenset(
     {
         WorkerStatus.CONNECTING.value,

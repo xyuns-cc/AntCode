@@ -53,18 +53,6 @@ def generate_run_id(task_id: int | str | None = None) -> str:
     return f"run_{timestamp}_{random_part}"
 
 
-def generate_short_id(length: int = 8) -> str:
-    """生成短随机 ID
-
-    Args:
-        length: ID 长度（字节数的两倍，因为是十六进制）
-
-    Returns:
-        十六进制随机字符串
-    """
-    return secrets.token_hex(length // 2)
-
-
 def generate_batch_id() -> str:
     """生成批次 ID
 
@@ -81,12 +69,3 @@ def generate_worker_id() -> str:
         格式: worker_{timestamp}_{random}
     """
     return generate_id("worker")
-
-
-def generate_session_id() -> str:
-    """生成会话 ID
-
-    Returns:
-        格式: session_{timestamp}_{random}
-    """
-    return generate_id("session")

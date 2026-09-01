@@ -6,17 +6,12 @@
 import asyncio
 import contextlib
 import os
-import platform
-import socket
 import time
 from collections.abc import Awaitable
 from typing import Optional, cast
 
 import redis.asyncio as redis
 from loguru import logger
-from redis.asyncio.retry import Retry
-from redis.backoff import ExponentialBackoff
-from redis.exceptions import ConnectionError, TimeoutError
 
 from antcode_core.common.exceptions import RedisConnectionError
 from antcode_core.common.settings_ref import current_settings
@@ -259,37 +254,6 @@ def _env_int(name: str, default: int) -> int:
 
 HOT_POOL_DEFAULT = _env_int("REDIS_HOT_POOL_MAX_CONN", 100)
 COLD_POOL_DEFAULT = _env_int("REDIS_COLD_POOL_MAX_CONN", 10)
-
-
-def _build_pool_kwargs(max_connections: int, **overrides) -> dict:
-    """构建符合项目默认配置的 ConnectionPool kwargs"""
-    retry = Retry(ExponentialBackoff(cap=1.0, base=0.1), retries=3)
-    pool_kwargs: dict = {
-        "max_connections": max_connections,
-        "retry_on_timeout": True,
-        "retry": retry,
-        "retry_on_error": [ConnectionError, TimeoutError],
-        "socket_timeout": 10,
-        "socket_connect_timeout": 10,
-        "socket_keepalive": True,
-        "health_check_interval": 30,
-        "encoding": "utf-8",
-        "decode_responses": False,
-    }
-
-    if platform.system() == "Linux":
-        keepalive_options = {}
-        if hasattr(socket, "TCP_KEEPIDLE"):
-            keepalive_options[socket.TCP_KEEPIDLE] = 60
-        if hasattr(socket, "TCP_KEEPINTVL"):
-            keepalive_options[socket.TCP_KEEPINTVL] = 15
-        if hasattr(socket, "TCP_KEEPCNT"):
-            keepalive_options[socket.TCP_KEEPCNT] = 4
-        if keepalive_options:
-            pool_kwargs["socket_keepalive_options"] = keepalive_options
-
-    pool_kwargs.update(overrides)
-    return pool_kwargs
 
 
 def _make_client(

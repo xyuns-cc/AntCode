@@ -480,21 +480,6 @@ class WorkerConfig:
 
 
 # 全局配置实例
-_worker_config: WorkerConfig | None = None
-
-
-def get_worker_config() -> WorkerConfig:
-    """获取全局Worker配置"""
-    global _worker_config
-    if _worker_config is None:
-        _worker_config = WorkerConfig.load_from_file()
-    return _worker_config
-
-
-def set_worker_config(config: WorkerConfig):
-    """设置全局Worker配置"""
-    global _worker_config
-    _worker_config = config
 
 
 def apply_resource_limits(config: WorkerConfig) -> WorkerConfig:
@@ -637,5 +622,4 @@ def init_worker_config(name: str = "Worker-001", port: int = 8001, region: str =
     )
 
     config.ensure_directories()
-    set_worker_config(config)
     return config

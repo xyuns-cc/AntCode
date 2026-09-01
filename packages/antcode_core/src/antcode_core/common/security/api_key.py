@@ -103,14 +103,6 @@ def store_api_key(worker: Any, plain_key: str) -> None:
     worker.api_key_hash = hash_api_key(plain_key)
 
 
-def store_api_key_previous(worker: Any, plain_key: str | None) -> None:
-    """轮换时只保存旧 API Key 哈希。"""
-    if not plain_key:
-        worker.api_key_previous_hash = None
-        return
-    worker.api_key_previous_hash = hash_api_key(plain_key)
-
-
 async def rotate_worker_api_key(
     worker_id: str,
     grace_minutes: int = 30,
