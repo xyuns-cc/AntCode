@@ -164,10 +164,12 @@ class WorkerAuthVerifier:
         signature: str,
         version: str,
     ) -> WorkerAuthReason:
-        """返回具体拒绝原因而非 bool：五种拒绝的运维动作完全不同。日志由
-        ``verify_request`` 集中打一条，避免同一次拒绝在两层各记一遍。"""
-        if version != WORKER_HTTP_SIGNATURE_VERSION:
-            return WorkerAuthReason.SIGNATURE_VERSION_UNSUPPORTED
+        """返回具体拒绝原因而非 bool：四种拒绝的运维动作完全不同。日志由
+        ``verify_request`` 集中打一条，避免同一次拒绝在两层各记一遍。
+
+        签名版本不在这里判：``_signature_headers`` 跑在前面且已独家判定；两层各判
+        一次只会让其中一层结构上永不可达——这里曾经就是那一层。
+        """
         secret = await self._secret_loader(worker_id)
         if secret is None:
             return WorkerAuthReason.IDENTITY_UNKNOWN
@@ -235,7 +237,8 @@ class WorkerAuthVerifier:
         if not worker_id or not timestamp_text or not nonce or not signature or not version:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少签名信息")
         if version != WORKER_HTTP_SIGNATURE_VERSION:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="不支持的签名版本")
+            logger.warning("Worker 签名版本不受支持: worker_id={} version={}", worker_id, version)
+            raise WorkerAuthRejected(WorkerAuthReason.SIGNATURE_VERSION_UNSUPPORTED)
         if len(nonce) > MAX_NONCE_LENGTH:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nonce 格式错误")
         try:

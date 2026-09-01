@@ -10,7 +10,8 @@
 """
 
 import pytest
-from antcode_core.common.security.worker_auth import WorkerAuthVerifier
+from antcode_core.common.security import WORKER_HTTP_SIGNATURE_HEADER
+from antcode_core.common.security.worker_auth import WorkerAuthRejected, WorkerAuthVerifier
 from antcode_core.common.security.worker_auth_reasons import WorkerAuthReason
 from fastapi import HTTPException
 
@@ -24,6 +25,7 @@ from tests.unit.core.worker_auth_support import (
 )
 
 _WORKER_ID_HEADER = {"X-Worker-ID": WORKER_ID}
+_UNSUPPORTED_VERSION = "99"
 
 
 async def _missing_secret(_worker_id: str) -> str | None:
@@ -67,6 +69,34 @@ async def test_wrong_signature_for_known_worker_keeps_signature_invalid_code() -
     # 反面：真的签名不符不得被说成身份丢失，否则运维会去清一份完全正常的凭据。
     assert rejection.error_code != WorkerAuthReason.IDENTITY_UNKNOWN.value
     assert "控制面不认识该 Worker 身份" not in rejection.detail
+
+
+@pytest.mark.asyncio
+async def test_unsupported_signature_version_is_rejected_with_its_own_code() -> None:
+    """签名协议一升版，全部存量 Worker 走的就是这条路径。
+
+    它以前在 ``_signature_headers`` 抛裸 ``HTTPException``，回包 ``data`` 为 null，
+    ``verify_signature_async`` 里那个返回 ``SIGNATURE_VERSION_UNSUPPORTED`` 的分支
+    因为跑在它后面而结构上永不可达。Worker 侧只认 ``data.error_code``，拿不到码就
+    落回 ``RuntimeError`` + 重启环——正是本模块存在的理由。
+    """
+    limiter = RateLimiterSpy()
+    verifier = WorkerAuthVerifier(load_shared_secret, _claim_nonce, limiter)
+    headers = {
+        **_WORKER_ID_HEADER,
+        **signature_headers({}),
+        WORKER_HTTP_SIGNATURE_HEADER: _UNSUPPORTED_VERSION,
+    }
+
+    rejection = await _reject(verifier, headers)
+
+    assert isinstance(rejection, WorkerAuthRejected)
+    assert rejection.status_code == HTTP_UNAUTHORIZED
+    assert rejection.error_code == WorkerAuthReason.SIGNATURE_VERSION_UNSUPPORTED.value
+    # 反面：版本不支持不得被折叠进"签名不符"，那会把人引向 HMAC 密钥和时钟。
+    assert rejection.error_code != WorkerAuthReason.SIGNATURE_INVALID.value
+    # 版本不对连一次 Redis 往返都不值得，判定必须仍排在限流之前。
+    assert limiter.calls == []
 
 
 @pytest.mark.asyncio

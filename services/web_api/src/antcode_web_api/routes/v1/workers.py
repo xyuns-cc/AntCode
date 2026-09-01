@@ -7,9 +7,8 @@ from antcode_core.application.services.workers import worker_service
 from antcode_core.common.config import settings  # noqa: F401  # 供测试 monkeypatch workers_route.settings 使用
 from antcode_core.common.security.api_key import store_api_key, store_secret_key  # noqa: F401
 from antcode_core.common.security.auth import TokenData
-from antcode_core.common.security.worker_auth import (
-    verify_worker_request_with_signature,
-)
+from antcode_core.common.security.worker_auth import WorkerAuthRejected, verify_worker_request_with_signature
+from antcode_core.common.security.worker_auth_reasons import WorkerAuthReason
 from antcode_core.domain.models import (  # noqa: F401  # Task 供测试 monkeypatch workers_route.Task 使用
     Task,
     TaskRun,
@@ -137,7 +136,8 @@ async def _verify_worker_credential_headers(
 
     worker = await worker_service.get_worker_by_id(worker_id)
     if not worker:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Worker 不存在")
+        # 与验签层 IDENTITY_UNKNOWN 同一件事（这里只剩验签后 Worker 被删的竞态），必须同码。
+        raise WorkerAuthRejected(WorkerAuthReason.IDENTITY_UNKNOWN)
 
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
