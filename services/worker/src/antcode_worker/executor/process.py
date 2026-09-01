@@ -1,10 +1,4 @@
-"""
-进程执行器
-
-基于 subprocess 的任务执行器，实现 stdout/stderr 捕获。
-
-Requirements: 7.2
-"""
+"""基于 subprocess 的任务执行器，实现 stdout/stderr 捕获。"""
 
 import asyncio
 import contextlib
@@ -54,7 +48,6 @@ from antcode_worker.executor.rule_policy import filter_spider_control_env, is_ru
 
 # C1: 子进程 env 白名单——只透传 shell/runtime 必需变量，其余一律不给用户代码，
 # 防止 WORKER_API_KEY / GATEWAY_TOKEN / REDIS_PASSWORD / CREDENTIAL_SECRET_KEY 泄漏。
-# 允许的 host 环境变量前缀（前缀匹配，例如 LANG*、LC_*）
 _ENV_HOST_ALLOWED_EXACT = frozenset(
     {
         "PATH",
@@ -94,7 +87,8 @@ _ENV_HOST_ALLOWED_PREFIX = (
 _ENV_DENY_PATTERNS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY", "CREDENTIAL", "PRIVATE_KEY")
 _PROCESS_HIJACK_ENV = frozenset({"BASH_ENV", "ENV", "PYTHONHOME"})
 _PROCESS_HIJACK_PREFIXES = ("LD_", "DYLD_")
-# P1-round6 5.3: PIPE 默认 64 KiB 与合同允许的 1 MiB 单行冲突; 提到 1 MiB 对齐合同, 超限行由 read_stream 的 drop 兜底。
+# PIPE 默认 64 KiB 与合同允许的 1 MiB 单行冲突（readline 会抛 LimitOverrunError 卡死）；
+# 提到 1 MiB 对齐合同，超限行由 read_output_stream 的 drop 兜底。
 _STREAM_READER_LIMIT_BYTES = 1024 * 1024
 
 
@@ -152,25 +146,9 @@ async def _stop_resource_monitor(monitor_task: asyncio.Task[None] | None) -> Bas
 
 
 class ProcessExecutor(BaseExecutor):
-    """
-    进程执行器
-
-    在独立子进程中执行任务，支持：
-    - stdout/stderr 实时捕获
-    - 超时控制（SIGTERM -> grace period -> SIGKILL）
-    - 资源监控（CPU/内存）
-    - 取消支持
-
-    Requirements: 7.2
-    """
+    """在独立子进程中执行任务：实时捕获输出、超时（SIGTERM→grace→SIGKILL）、资源监控、取消。"""
 
     def __init__(self, config: ExecutorConfig | None = None):
-        """
-        初始化进程执行器
-
-        Args:
-            config: 执行器配置
-        """
         super().__init__(config)
         self._launch_cancellations: dict[str, asyncio.Event] = {}
         self._launch_lock = asyncio.Lock()
@@ -184,20 +162,6 @@ class ProcessExecutor(BaseExecutor):
         startup_event: asyncio.Event | None = None,
         admission: ExecutionAdmission | None = None,
     ) -> ExecResult:
-        """
-        执行任务
-
-        Args:
-            exec_plan: 执行计划
-            runtime_handle: 运行时句柄
-            log_sink: 日志接收器
-
-        Returns:
-            ExecResult 执行结果
-
-        Requirements: 7.2
-        """
-        # 生成 run_id（如果 exec_plan 没有提供）
         run_id = exec_plan.run_id or exec_plan.plugin_name or f"run_{int(time.time() * 1000)}"
         cancel_event = await self._begin_launch(run_id)
         if startup_event is not None:
@@ -205,7 +169,6 @@ class ProcessExecutor(BaseExecutor):
         if admission is not None:
             await admission.executor_ready()
 
-        # 使用空日志接收器如果未提供
         sink = log_sink or NoOpLogSink()
 
         try:
@@ -224,7 +187,6 @@ class ProcessExecutor(BaseExecutor):
         log_sink: LogSink,
         cancel_event: asyncio.Event,
     ) -> ExecResult:
-        """执行任务的内部实现"""
         started_at = datetime.now()
 
         try:
@@ -232,9 +194,8 @@ class ProcessExecutor(BaseExecutor):
             env = self._build_env(exec_plan, runtime_handle)
             cwd = exec_plan.cwd or runtime_handle.path
 
-            # P0-04 (round6): 完整 argv 可能带 token/API_KEY/credentials(Rule 插件
-            # 的 target_url、Go/Python CLI 的 --api-key= 等)。用 sanitize_log_message
-            # 脱敏后再 log,避免通过 Worker debug 日志外带凭据。
+            # P0-04: 完整 argv 可能带 token/API_KEY（Rule 的 target_url、CLI 的
+            # --api-key= 等），必须脱敏后再 log，否则从 debug 日志外带凭据。
             from antcode_core.common.logging import sanitize_log_message
 
             logger.debug(f"执行命令: {sanitize_log_message(' '.join(cmd))}, cwd={cwd}")
@@ -273,13 +234,7 @@ class ProcessExecutor(BaseExecutor):
             return result
 
     async def _spawn_process(self, spec: _LaunchSpec) -> asyncio.subprocess.Process:
-        """拉起子进程；沙箱未生效时拒绝启动。
-
-        P1-round6 5.3: asyncio.subprocess StreamReader 默认 buffer 64 KiB,
-        业务合同允许 1 MiB 单行 -> readline() 抛 LimitOverrunError 阻塞。
-        把 limit 提到 1 MiB 与合同对齐, 超限行仍走 read_stream 的 drop
-        兜底(不 break, 保证 drain), 不会因缓冲区大而放大内存。
-        """
+        """拉起子进程；沙箱未生效时拒绝启动。"""
         sandbox = self._resolve_sandbox_limits(spec.exec_plan, spec.cmd)
         preexec = build_preexec_fn(sandbox)
         try:
@@ -293,9 +248,8 @@ class ProcessExecutor(BaseExecutor):
                 limit=_STREAM_READER_LIMIT_BYTES,
             )
         except SubprocessError as exc:
-            # B7/B8: CPython 会丢弃 preexec_fn 内部的异常，父进程只拿到一句
-            # "Exception occurred in preexec_fn."。补上上下文，让运维知道是哪一组
-            # 沙箱设置没能生效（例如 macOS 的 RLIMIT_AS 恒不可设）。
+            # B7/B8: CPython 丢弃 preexec_fn 内部的异常，父进程只拿到一句 "Exception
+            # occurred in preexec_fn."，必须补上下文才知道是哪一组沙箱设置没生效。
             raise RuntimeError(
                 f"子进程沙箱初始化失败（os.setsid 或 setrlimit 未生效），"
                 f"拒绝在无沙箱状态下执行；请求的限制: {sandbox.describe()}；原始错误: {exc}"
@@ -310,7 +264,6 @@ class ProcessExecutor(BaseExecutor):
             memory_mb=effective_memory_limit_mb(exec_plan.memory_limit_mb, self.config.default_memory_limit_mb),
             max_open_files=exec_plan.max_open_files or self.config.default_max_open_files,
             max_processes=host_max_processes(cmd, exec_plan.max_processes or self.config.default_max_processes),
-            # T7-P2-4: RLIMIT_FSIZE 单文件上限
             file_size_mb=exec_plan.max_file_size_mb or self.config.default_max_file_size_mb,
         )
 
@@ -420,14 +373,11 @@ class ProcessExecutor(BaseExecutor):
         )
 
     def _build_command(self, exec_plan: ExecPlan, runtime_handle: RuntimeHandle) -> list[str]:
-        """构建执行命令"""
-        # 使用运行时的 Python 解释器
         if exec_plan.command.endswith(".py"):
             cmd = [runtime_handle.python_executable, exec_plan.command]
         else:
             cmd = [exec_plan.command]
 
-        # 添加参数
         cmd.extend(exec_plan.args)
 
         return cmd
@@ -446,7 +396,6 @@ class ProcessExecutor(BaseExecutor):
         """
         host_env = os.environ
 
-        # 1. 白名单透传
         env: dict[str, str] = {key: value for key, value in host_env.items() if _is_env_allowed_from_host(key)}
 
         task_env_keys = frozenset(exec_plan.env)
@@ -474,18 +423,7 @@ class ProcessExecutor(BaseExecutor):
         seq_counter: dict[str, int],
         timeout: int,
     ) -> tuple[int, int, int]:
-        """
-        流式读取输出
-
-        Args:
-            process_info: 进程信息
-            log_sink: 日志接收器
-            seq_counter: 序列号计数器
-            timeout: 超时时间（秒）
-
-        Returns:
-            (exit_code, stdout_lines, stderr_lines)
-        """
+        """流式读取输出，返回 ``(exit_code, stdout_lines, stderr_lines)``。"""
         process = process_info.process
         run_id = process_info.run_id
         max_lines = self.config.max_output_lines
@@ -495,7 +433,6 @@ class ProcessExecutor(BaseExecutor):
         stderr_count = 0
 
         def safe_get_result(task: asyncio.Task) -> int:
-            """安全获取任务结果"""
             if task.done() and not task.cancelled():
                 return task.result()
             return 0
@@ -506,7 +443,6 @@ class ProcessExecutor(BaseExecutor):
         stdout_count = 0
         stderr_count = 0
         try:
-            # 创建读取任务
             if process.stdout is None or process.stderr is None:
                 raise RuntimeError("执行进程未创建 stdout/stderr 管道")
             stdout_task = asyncio.create_task(
@@ -523,22 +459,18 @@ class ProcessExecutor(BaseExecutor):
             )
             wait_task = asyncio.create_task(process.wait())
 
-            # 等待完成或超时
             done, pending = await asyncio.wait(
                 [stdout_task, stderr_task, wait_task],
                 timeout=timeout,
                 return_when=asyncio.ALL_COMPLETED,
             )
 
-            # 处理超时
             if pending:
                 for task in pending:
                     task.cancel()
-                    # 等待任务取消完成
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
 
-                # 终止进程
                 await self._terminate_process(
                     process_info,
                     self._grace_period(process_info.exec_plan),
@@ -546,7 +478,6 @@ class ProcessExecutor(BaseExecutor):
 
                 return 124, safe_get_result(stdout_task), safe_get_result(stderr_task)
 
-            # 获取结果
             stdout_count = safe_get_result(stdout_task)
             stderr_count = safe_get_result(stderr_task)
 
@@ -566,7 +497,6 @@ class ProcessExecutor(BaseExecutor):
                         await child_task
             raise
         except TimeoutError:
-            # 超时处理
             await self._terminate_process(
                 process_info,
                 self._grace_period(process_info.exec_plan),
@@ -574,29 +504,19 @@ class ProcessExecutor(BaseExecutor):
             return 124, stdout_count, stderr_count
 
     async def _terminate_process(self, process_info: ProcessInfo, grace_period: float) -> None:
-        """
-        终止进程
-
-        先发送 SIGTERM，等待 grace_period 后发送 SIGKILL。
-
-        Args:
-            process_info: 进程信息
-            grace_period: 等待时间（秒）
-        """
+        """SIGTERM 到整个进程组（防 fork 出的子进程残留），``grace_period`` 秒后 SIGKILL。"""
         process = process_info.process
 
         if process.returncode is not None:
             return
 
         try:
-            # 发送 SIGTERM 到整个进程组（防止 fork 出的子进程残留）
             signal_process_group(process, signal.SIGTERM)
             logger.debug(f"发送 SIGTERM: {process_info.run_id}")
 
             try:
                 await asyncio.wait_for(process.wait(), timeout=grace_period)
             except TimeoutError:
-                # 发送 SIGKILL 到整个进程组
                 signal_process_group(process, signal.SIGKILL)
                 logger.debug(f"发送 SIGKILL: {process_info.run_id}")
                 await process.wait()
@@ -605,27 +525,21 @@ class ProcessExecutor(BaseExecutor):
             # 进程已退出
             pass
         except Exception as e:
-            # P0-04 (round6): 终止失败必须向上抛,让调用方(engine.cancel /
-            # forced_cancel)知道 kill 未生效,不能报告"取消成功"给 Master;
-            # 否则旧子进程与 L2 接管者并行执行,PEL reclaim 双执行。
+            # P0-04: 终止失败必须向上抛，让 engine.cancel / forced_cancel 知道 kill 未生效。
+            # 报"取消成功"会让旧子进程与 L2 接管者并行执行，PEL reclaim 双执行。
             logger.error(f"终止进程失败(将向上抛让 caller 感知): run_id={process_info.run_id} err={e}")
             raise RuntimeError(f"终止进程失败: run_id={process_info.run_id}") from e
 
-        # P0-04 (round6): SIGKILL + process.wait() 后如果 returncode 仍是 None,
-        # 说明子进程未死透(极端情况:D-state / kernel bug / cgroup 冻结),
-        # 这时也必须让 caller 知道,不能沉默返回。
+        # P0-04: SIGKILL + wait() 后 returncode 仍是 None 说明子进程未死透
+        # （D-state / cgroup 冻结），同样不能沉默返回。
         if process.returncode is None:
             raise RuntimeError(f"终止进程失败: 发送 SIGKILL 后进程仍未退出: run_id={process_info.run_id}")
 
     async def _monitor_resources(self, process_info: ProcessInfo) -> None:
         """按整棵进程树监控 CPU/内存，超限时主动杀掉进程组。
 
-        B8: 采样必须走 ``sample_process_tree``——启用沙箱时 ``process.pid`` 只是
-        bwrap 外壳（rule 场景外面还有一层 relay），真正吃内存的是它的子孙进程，
-        只看根进程的 RSS 会让超限判定永不成立。
-
-        采样异常一律上抛：监控失效意味着资源上限失去主动兜底，调用方必须知情，
-        不能把这次执行悄悄报成 SUCCESS。
+        B8: 必须走 ``sample_process_tree``——``process.pid`` 只是 bwrap 外壳，只看根进程
+        的 RSS 会让超限判定永不成立。采样异常一律上抛：监控失效即上限失去主动兜底。
         """
         process = process_info.process
         exec_plan = process_info.exec_plan
@@ -688,7 +602,6 @@ class ProcessExecutor(BaseExecutor):
         return RunStatus.FAILED, ExitReason.ERROR, failure_message(exit_code, process_info, scratch_limit_mb)
 
     async def _do_cancel(self, run_id: str, task_info: Any) -> None:
-        """执行取消操作"""
         process_info: ProcessInfo = task_info
         process_info.cancelled = True
 

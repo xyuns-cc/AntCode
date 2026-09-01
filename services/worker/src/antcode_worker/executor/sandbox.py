@@ -1,10 +1,4 @@
-"""
-沙箱模块
-
-提供可插拔的沙箱实现，支持 no-op 模式。
-
-Requirements: 7.4
-"""
+"""可插拔的沙箱执行器，支持 no-op 模式。"""
 
 import asyncio
 from dataclasses import dataclass
@@ -51,13 +45,7 @@ class SandboxExecution:
 
 
 class SandboxExecutor(BaseExecutor):
-    """
-    沙箱执行器
-
-    在沙箱环境中执行任务，支持可插拔的沙箱实现。
-
-    Requirements: 7.4
-    """
+    """在沙箱环境中执行任务；沙箱实现可插拔，实际落地仍走 ``ProcessExecutor``。"""
 
     def __init__(
         self,
@@ -65,19 +53,10 @@ class SandboxExecutor(BaseExecutor):
         sandbox_config: SandboxConfig | None = None,
         sandbox_provider: SandboxProvider | None = None,
     ):
-        """
-        初始化沙箱执行器
-
-        Args:
-            config: 执行器配置
-            sandbox_config: 沙箱配置
-            sandbox_provider: 沙箱提供者（可选，默认使用 BasicSandbox）
-        """
         super().__init__(config)
 
         self.sandbox_config = sandbox_config or SandboxConfig()
 
-        # 选择沙箱提供者
         if sandbox_provider:
             self._sandbox = sandbox_provider
         elif self.sandbox_config.enabled:
@@ -85,21 +64,17 @@ class SandboxExecutor(BaseExecutor):
         else:
             self._sandbox = NoOpSandbox()
 
-        # 内部使用 ProcessExecutor 执行
         self._process_executor = ProcessExecutor(config)
 
     @property
     def sandbox(self) -> SandboxProvider:
-        """获取沙箱提供者"""
         return self._sandbox
 
     async def start(self) -> None:
-        """启动执行器"""
         await super().start()
         await self._process_executor.start()
 
     async def stop(self, grace_period: float = 10.0) -> None:
-        """停止执行器"""
         await self._process_executor.stop(grace_period)
         await super().stop(grace_period)
 
@@ -116,19 +91,6 @@ class SandboxExecutor(BaseExecutor):
         *,
         admission: ExecutionAdmission | None = None,
     ) -> ExecResult:
-        """
-        在沙箱中执行任务
-
-        Args:
-            exec_plan: 执行计划
-            runtime_handle: 运行时句柄
-            log_sink: 日志接收器
-
-        Returns:
-            ExecResult 执行结果
-
-        Requirements: 7.4
-        """
         sink = log_sink or NoOpLogSink()
         # P0-02: 用真实 run_id 注册任务；plugin_name 是共享键（"rule"/"code"），
         # 会让 base.cancel() 找不到真 run_id 而直接返回 False，也会让同插件并发任务互相覆盖。
@@ -158,7 +120,6 @@ class SandboxExecutor(BaseExecutor):
         self,
         execution: SandboxExecution,
     ) -> ExecResult:
-        """在沙箱中执行任务"""
         started_at = datetime.now()
         context: dict[str, Any] = {}
         process_task: asyncio.Task[ExecResult] | None = None
@@ -215,7 +176,6 @@ class SandboxExecutor(BaseExecutor):
         runtime_handle: RuntimeHandle,
         context: dict[str, Any],
     ) -> ExecPlan:
-        """创建沙箱化的执行计划"""
         return create_sandboxed_plan(
             self._sandbox,
             self.config,
@@ -227,7 +187,6 @@ class SandboxExecutor(BaseExecutor):
         )
 
     async def _do_cancel(self, run_id: str, task_info: Any) -> None:
-        """执行取消操作"""
         if isinstance(task_info, SandboxRunMarker):
             task_info.cancel_requested = True
         await self._process_executor.cancel(run_id)

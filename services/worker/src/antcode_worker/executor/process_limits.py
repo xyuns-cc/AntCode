@@ -1,11 +1,7 @@
-"""
-子进程沙箱限制
+"""为 ``ProcessExecutor`` 构造 ``preexec_fn``：独立进程组 + POSIX rlimit。
 
-为 ``ProcessExecutor`` 构造 ``preexec_fn``：独立进程组 + POSIX rlimit。
-从 ``process.py`` 拆出，让后者只保留子进程生命周期编排。
-
-B7/B8: 这里的每一步失败都必须让子进程"根本起不来"——沙箱失效必须表现为
-启动失败，绝不能是静默放行。
+B7/B8: 这里的每一步失败都必须让子进程"根本起不来"——沙箱失效必须表现为启动失败，
+绝不能是静默放行。
 """
 
 import os
@@ -26,35 +22,26 @@ _BYTES_PER_MIB = 1024 * 1024
 
 # 内存上限映射到 RLIMIT_DATA 而不是 RLIMIT_AS。
 #
-# RLIMIT_AS 限的是**虚拟地址空间**，而现代运行时会 PROT_NONE 预留远超实际用量的
-# 地址区间（预留不占物理页）：JVM 光 compressed class space 就保留 1GiB，tsx 的
-# V8 WASM 要 32~64GB。按"预留量"收费的结果是——真机实测，同一 bwrap 画像下同一个
-# 用例：Java 在 RLIMIT_AS 2808MB（31GB/8 核机器的自适应默认值）起不来 JVM，
-# RLIMIT_DATA 128MB 就能跑；TypeScript 在 RLIMIT_AS 32768MB 仍 OOM、要 65536MB
-# 才过，而 task_memory_limit_mb 的 API 上限只有 8192MB，即抬上限根本无解，
-# RLIMIT_DATA 256MB 直接通过。
+# RLIMIT_AS 限的是**虚拟地址空间**，而现代运行时会 PROT_NONE 预留远超实际用量的地址
+# 区间（JVM 光 compressed class space 就保留 1GiB，tsx 的 V8 WASM 要 32~64GB）。真机
+# 实测同一 bwrap 画像：Java 在 RLIMIT_AS 2808MB 起不来 JVM、RLIMIT_DATA 128MB 就能跑；
+# TypeScript 在 RLIMIT_AS 32768MB 仍 OOM、要 65536MB 才过，而 task_memory_limit_mb 的
+# API 上限只有 8192MB（抬上限无解），RLIMIT_DATA 256MB 直接通过。RLIMIT_DATA 自 Linux
+# 4.7 起覆盖 brk 与私有可写映射，PROT_NONE 预留不计入。
 #
-# RLIMIT_DATA 自 Linux 4.7 起覆盖 brk 与私有可写映射，PROT_NONE 预留不计入，
-# 因此收的是"真的会写下去的内存"。
+# 语义代价（必须知情）：MAP_SHARED 匿名映射与 tmpfs 页不计入 RLIMIT_DATA，且这两类页
+# **不由同一层兜底**——
+# - 被映射进地址空间的页计入 ``memory_info().rss``，进程树 RSS 监控看得见并杀进程组。
+#   实测（限额 1433MB）：MAP_SHARED 写满 2000MB，采到树 RSS 2013MB，判定成立。
+# - ``write()`` 写进 tmpfs 的页没有任何进程映射它，**不进任何进程的 RSS**，进程树监控
+#   完全失明。同一画像 dd 往沙箱 /tmp 写 3000MB（2.09×限额）：任务树 RSS 全程 ≤6.1MB、
+#   exit 0 上报 SUCCESS，容器 memory.current 冲到 2816MB。约束它的只有挂载本身与容器级
+#   mem_limit，见 ``sandbox_scratch``（四个挂载点缺一个，缺的那个就是宿主内存一半那么
+#   大的可写盘）。
 #
-# 语义代价（必须知情）：MAP_SHARED 匿名映射与 tmpfs 页不计入 RLIMIT_DATA，
-# 而 RLIMIT_AS 会计入。但这两类页**不由同一层兜底**，写成一句会得到一个不存在的防护：
-#
-# - 被映射进地址空间的页（MAP_SHARED 匿名映射、mmap 出来的 tmpfs 页）计入
-#   ``memory_info().rss``，进程树 RSS 监控看得见，超限直接杀进程组。真机实测
-#   （192.168.1.250 / 限额 1433MB）：MAP_SHARED 写满 2000MB，采到树 RSS 2013MB，
-#   判定成立。
-# - ``write()`` 写进 tmpfs 的页**没有任何进程映射它，因此不进任何进程的 RSS**，
-#   进程树监控对这条路径完全失明。同一画像下 dd 往沙箱 /tmp 写 3000MB（2.09×限额）：
-#   任务树 RSS 全程 ≤6.1MB、exit 0 上报 SUCCESS，而容器 memory.current 冲到 2816MB。
-#   约束它的只有挂载本身与容器级 mem_limit，与 RSS 监控无关：/tmp 与 /dev/shm 由
-#   ``--size`` 按本任务的内存限额定尺寸；沙箱另外两个 tmpfs（newroot 自身与 ``--dev``
-#   建的 /dev）拿不到 ``--size``，改由 ``--remount-ro`` 封成只读。见
-#   ``sandbox_scratch``——四个挂载点缺一个，缺的那个就是宿主内存一半那么大的可写盘。
-#
-# 容器内 /sys/fs/cgroup 是只读挂载且 cgroup.subtree_control 为空，
-# 在现有安全画像（cap_drop ALL / no-new-privileges / 非 root）下无法为每个任务
-# 创建 cgroup，所以"每任务内存硬限额"没有内核级实现。
+# 容器内 /sys/fs/cgroup 是只读挂载且 cgroup.subtree_control 为空，在现有安全画像
+# （cap_drop ALL / no-new-privileges / 非 root）下无法为每个任务创建 cgroup，所以
+# "每任务内存硬限额"没有内核级实现。
 _MEMORY_RLIMIT_NAME = "RLIMIT_DATA"
 
 # B8: Windows 上 ProcessExecutor 根本无法工作，必须显式拒绝而不是假装沙箱生效。
@@ -86,8 +73,7 @@ class SandboxLimits:
     file_size_mb: int
 
     def describe(self) -> str:
-        # 点名内存用的是哪一项 rlimit：它决定了"限住的是什么"（可写数据段而非
-        # 虚拟地址空间），排障时不写清楚会把人引向错误的量级判断。
+        # 点名内存用的是哪一项 rlimit：排障时它决定了"限住的是什么"的量级判断。
         return (
             f"enforce_rlimit={self.enforce_rlimit}, cpu={self.cpu_seconds}s, "
             f"mem={self.memory_mb}MB({_MEMORY_RLIMIT_NAME}), "
@@ -98,9 +84,7 @@ class SandboxLimits:
     def requested_rlimits(self) -> tuple[RlimitRequest, ...]:
         """把已解析的限制值映射成 rlimit 列表；<=0 表示该项不限制。
 
-        T7-P2-4: ``file_size_mb`` → RLIMIT_FSIZE，防止子进程写单个大文件把
-        worker 磁盘打爆。POSIX RLIMIT_FSIZE 只限单文件，配合 artifact_cleanup
-        的总量控制形成双层防护。
+        RLIMIT_FSIZE 只限单文件，总量由 artifact_cleanup 控制，两层缺一不可。
         """
         if not self.enforce_rlimit:
             return ()
@@ -118,14 +102,11 @@ def effective_memory_limit_mb(plan_limit_mb: int, default_limit_mb: int) -> int:
     """本次执行真正生效的内存限额：计划值优先，0 表示"本次未指定"，退到执行器默认值。
 
     进程层（RLIMIT_DATA + 进程树 RSS 监控）与沙箱层（tmpfs ``--size``）必须用**同一个**
-    数。两处各写一遍 ``a or b``，改动其一就会分叉成"rlimit 按 1433MB 收、tmpfs 按另一个
-    数切"——而这种分叉在真机上的表现是"限额看起来生效了却拦不住"，正是本仓反复出现的
-    同名双实现。
+    数；两处各写一遍 ``a or b``，改动其一就分叉成"限额看起来生效了却拦不住"。
 
-    两个值都是 0 不是"运维关掉了内存限额"，而是**接线断了**：``init_worker_config``
-    恒把 0 换成自适应或默认限额（下界 256MB），``engine/config_update`` 走同一条区间
-    校验，没有任何合法路径能让运行期读到 0。返回值原样交给下游，由真正要用它的那一层
-    （``sandbox_mounts._tmpfs_size_args``）显式拒绝——在这里再判一遍就是第二个真源。
+    两个值都是 0 不是"运维关掉了内存限额"，而是**接线断了**（``init_worker_config`` 恒把
+    0 换成自适应或默认限额，下界 256MB）。返回值原样交给下游，由真正要用它的那一层
+    （``sandbox_scratch._tmpfs_size_args``）显式拒绝——在这里再判一遍就是第二个真源。
     """
     return plan_limit_mb or default_limit_mb
 
@@ -166,13 +147,10 @@ def apply_rlimit(request: RlimitRequest) -> None:
 def build_preexec_fn(limits: SandboxLimits) -> Callable[[], None]:
     """构造子进程 preexec_fn：独立进程组 + POSIX rlimit。
 
-    B7/B8: 这里的每一步失败都必须让子进程"根本起不来"。
-    - ``os.setsid()`` 失败 → 子进程会留在 Worker 自己的进程组里，随后的
-      ``killpg`` 会把 Worker 主进程连同所有兄弟任务一起杀掉；
-    - ``setrlimit`` 失败 → 子进程以无限制运行，而调用方与 master 毫无感知，
-      任务照常上报 SUCCESS。
-    两者都直接抛异常：CPython 会在 exec 之前中止子进程，``create_subprocess_exec``
-    随之抛错，绝不放行一个没有沙箱的进程。
+    B7/B8: 每一步失败都必须让子进程根本起不来（异常在 exec 前中止子进程）。
+    - ``os.setsid()`` 失败 → 子进程留在 Worker 进程组里，随后的 ``killpg`` 会把 Worker
+      主进程连同所有兄弟任务一起杀掉；
+    - ``setrlimit`` 失败 → 子进程无限制运行，而调用方与 master 毫无感知，照常报 SUCCESS。
     """
     require_posix_platform()
 

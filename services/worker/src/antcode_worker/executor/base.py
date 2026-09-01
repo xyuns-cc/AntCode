@@ -22,59 +22,38 @@ from antcode_worker.rule_egress_limits import RuleEgressLimits
 
 
 class LogSink(Protocol):
-    """
-    日志接收器协议
+    """日志输出接口，用于解耦执行器与日志系统。"""
 
-    定义日志输出的接口，用于解耦执行器和日志系统。
-    """
+    async def write(self, entry: LogEntry) -> None: ...
 
-    async def write(self, entry: LogEntry) -> None:
-        """写入日志条目"""
-        ...
-
-    async def flush(self) -> None:
-        """刷新缓冲区"""
-        ...
+    async def flush(self) -> None: ...
 
 
 @dataclass
 class ExecutorConfig:
-    """执行器配置"""
-
-    # 并发控制
     max_concurrent: int = 5
+    default_timeout: int = 3600  # 秒
+    default_grace_period: int = 10  # SIGTERM 后等待秒数
 
-    # 默认超时（秒）
-    default_timeout: int = 3600
-
-    # 默认 grace period（SIGTERM 后等待时间）
-    default_grace_period: int = 10
-
-    # 资源限制
     default_memory_limit_mb: int = 0  # 0 = 不限制
     default_cpu_limit_seconds: int = 0  # 0 = 不限制
 
     # 沙箱硬限制（POSIX rlimit；非 POSIX 平台自动跳过）
-    enforce_rlimit: bool = True  # 默认开启：独立进程组 + rlimit
-    # V13: 256 太低,爬虫 16 并发 + DNS + TLS + keepalive 池极易触发 EMFILE。
-    # 实测 scrapy/playwright 子进程稳定 800~1500 fd,留余量到 2048。
+    enforce_rlimit: bool = True
+    # 256 太低：爬虫 16 并发 + DNS + TLS + keepalive 池极易触发 EMFILE。实测
+    # scrapy/playwright 子进程稳定 800~1500 fd，留余量到 2048。
     default_max_open_files: int = 2048
     default_max_processes: int = 64
-    # T7-P2-4 (P2-4): RLIMIT_FSIZE 保护 worker 磁盘。默认 1024 MB 单文件
-    # 上限——保护"失控爬虫把日志/artifact 写满磁盘"的 DoS 场景；正常
-    # 项目（rule/code）单文件产物远不到 1GB。运维可通过 config 调整。
+    # RLIMIT_FSIZE 单文件上限，挡"失控爬虫写满磁盘"；正常项目单文件产物远不到 1GB。
     default_max_file_size_mb: int = 1024
     rule_egress_limits: RuleEgressLimits = field(default_factory=RuleEgressLimits)
 
-    # 输出限制
     max_output_lines: int = 100000
-    max_output_bytes: int = 100 * 1024 * 1024  # 100MB
+    max_output_bytes: int = 100 * 1024 * 1024
 
 
 @dataclass
 class ExecutorStats:
-    """执行器统计信息"""
-
     total_executions: int = 0
     completed: int = 0
     failed: int = 0
@@ -94,40 +73,18 @@ class ExecutorStats:
 
 
 class BaseExecutor(ABC):
-    """
-    执行器基类
-
-    定义任务执行的抽象接口：
-    - run(exec_plan, runtime_handle, log_sink) -> ExecResult
-
-    提供通用功能：
-    - 并发控制（信号量）
-    - 任务注册/注销
-    - 取消支持
-    - 统计信息
-
-    Requirements: 7.1
-    """
+    """执行器基类：抽象 ``run``，并提供并发控制、任务注册/注销、取消与统计。"""
 
     def __init__(self, config: ExecutorConfig | None = None):
-        """
-        初始化执行器
-
-        Args:
-            config: 执行器配置
-        """
         self.config = config or ExecutorConfig()
 
         self._concurrency_gate = ResizableConcurrencyGate(self.config.max_concurrent)
 
-        # 运行中的任务 {run_id: task_info}
+        # {run_id: task_info}
         self._running_tasks: dict[str, Any] = {}
         self._lock = asyncio.Lock()
 
-        # 统计信息
         self._stats = ExecutorStats()
-
-        # 运行状态
         self._running = False
 
     @abstractmethod
@@ -139,25 +96,10 @@ class BaseExecutor(ABC):
         *,
         admission: ExecutionAdmission | None = None,
     ) -> ExecResult:
-        """
-        执行任务
-
-        这是执行器的核心方法，子类必须实现。
-
-        Args:
-            exec_plan: 执行计划（由 Plugin 生成）
-            runtime_handle: 运行时句柄（由 RuntimeManager 提供）
-            log_sink: 日志接收器（可选）
-
-        Returns:
-            ExecResult 执行结果
-
-        Requirements: 7.1
-        """
+        """执行任务：``exec_plan`` 由 Plugin 生成，``runtime_handle`` 由 RuntimeManager 提供。"""
         pass
 
     async def start(self) -> None:
-        """启动执行器"""
         if self._running:
             return
 
@@ -170,20 +112,13 @@ class BaseExecutor(ABC):
         self.config.max_concurrent = max_concurrent
 
     async def stop(self, grace_period: float = 10.0) -> None:
-        """
-        停止执行器
-
-        Args:
-            grace_period: 等待运行中任务完成的时间（秒）
-        """
+        """停止执行器；``grace_period`` 是等待运行中任务完成的秒数。"""
         self._running = False
 
-        # 取消所有运行中的任务
         run_ids = list(self._running_tasks.keys())
         for run_id in run_ids:
             await self.cancel(run_id)
 
-        # 等待任务完成
         if self._running_tasks:
             logger.info(f"等待 {len(self._running_tasks)} 个任务完成...")
             await asyncio.sleep(grace_period)
@@ -195,15 +130,7 @@ class BaseExecutor(ABC):
         return run_id in self._running_tasks
 
     async def cancel(self, run_id: str) -> bool:
-        """
-        取消任务
-
-        Args:
-            run_id: 运行 ID
-
-        Returns:
-            ``False`` 仅表示任务不存在；真实取消失败直接抛出异常。
-        """
+        """取消任务。``False`` 仅表示任务不存在；真实取消失败直接抛出异常。"""
         async with self._lock:
             task_info = self._running_tasks.get(run_id)
             if not task_info:
@@ -215,29 +142,19 @@ class BaseExecutor(ABC):
 
     @abstractmethod
     async def _do_cancel(self, run_id: str, task_info: Any) -> None:
-        """
-        执行取消操作（子类实现）
-
-        Args:
-            run_id: 运行 ID
-            task_info: 任务信息
-        """
         pass
 
     async def _register_task(self, run_id: str, task_info: Any) -> None:
-        """注册运行中的任务"""
         async with self._lock:
             self._running_tasks[run_id] = task_info
             self._stats.running = len(self._running_tasks)
 
     async def _unregister_task(self, run_id: str) -> None:
-        """注销任务"""
         async with self._lock:
             self._running_tasks.pop(run_id, None)
             self._stats.running = len(self._running_tasks)
 
     def _update_stats(self, status: RunStatus) -> None:
-        """更新统计信息"""
         self._stats.total_executions += 1
 
         if status == RunStatus.SUCCESS:
@@ -261,23 +178,6 @@ class BaseExecutor(ABC):
         artifacts: list[ArtifactRef] | None = None,
         **kwargs: Any,
     ) -> ExecResult:
-        """
-        创建执行结果
-
-        Args:
-            run_id: 运行 ID
-            status: 运行状态
-            exit_code: 退出码
-            exit_reason: 退出原因
-            error_message: 错误信息
-            started_at: 开始时间
-            finished_at: 结束时间
-            artifacts: 产物列表
-            **kwargs: 其他字段
-
-        Returns:
-            ExecResult
-        """
         now = datetime.now()
         started = started_at or now
         finished = finished_at or now
@@ -299,21 +199,17 @@ class BaseExecutor(ABC):
 
     @property
     def running_count(self) -> int:
-        """运行中的任务数"""
         return len(self._running_tasks)
 
     @property
     def available_slots(self) -> int:
-        """可用槽位数"""
         return self.config.max_concurrent - len(self._running_tasks)
 
     @property
     def is_running(self) -> bool:
-        """是否正在运行"""
         return self._running
 
     def get_stats(self) -> dict[str, Any]:
-        """获取统计信息"""
         stats = self._stats.to_dict()
         stats["max_concurrent"] = self.config.max_concurrent
         stats["available_slots"] = self.available_slots
@@ -321,39 +217,26 @@ class BaseExecutor(ABC):
 
 
 class NoOpLogSink:
-    """空日志接收器（用于测试或不需要日志时）"""
+    """丢弃全部日志（测试或不需要日志时）。"""
 
     async def write(self, entry: LogEntry) -> None:
-        """丢弃日志"""
         pass
 
     async def flush(self) -> None:
-        """无操作"""
         pass
 
 
 class CallbackLogSink:
-    """
-    回调日志接收器
-
-    将日志转发给回调函数。
-    """
+    """把日志转发给回调函数（同步或异步均可）。"""
 
     def __init__(
         self,
         callback: Callable[[LogEntry], None | Coroutine[Any, Any, None]],
     ):
-        """
-        初始化
-
-        Args:
-            callback: 日志回调函数（可以是同步或异步）
-        """
         self._callback = callback
         self._buffer: list[LogEntry] = []
 
     async def write(self, entry: LogEntry) -> None:
-        """写入日志"""
         try:
             result = self._callback(entry)
             if asyncio.iscoroutine(result):
@@ -362,16 +245,11 @@ class CallbackLogSink:
             logger.debug(f"日志回调失败: {e}")
 
     async def flush(self) -> None:
-        """刷新（无操作）"""
         pass
 
 
 class BufferedLogSink:
-    """
-    缓冲日志接收器
-
-    缓冲日志条目，支持批量刷新。
-    """
+    """缓冲日志条目，按条数或时间间隔批量刷新。"""
 
     def __init__(
         self,
@@ -379,14 +257,6 @@ class BufferedLogSink:
         max_buffer_size: int = 100,
         flush_interval: float = 1.0,
     ):
-        """
-        初始化
-
-        Args:
-            flush_callback: 刷新回调函数
-            max_buffer_size: 最大缓冲大小
-            flush_interval: 刷新间隔（秒）
-        """
         self._flush_callback = flush_callback
         self._max_buffer_size = max_buffer_size
         self._flush_interval = flush_interval
@@ -395,11 +265,9 @@ class BufferedLogSink:
         self._last_flush = datetime.now()
 
     async def write(self, entry: LogEntry) -> None:
-        """写入日志"""
         async with self._lock:
             self._buffer.append(entry)
 
-            # 检查是否需要刷新
             should_flush = (
                 len(self._buffer) >= self._max_buffer_size
                 or (datetime.now() - self._last_flush).total_seconds() >= self._flush_interval
@@ -409,7 +277,6 @@ class BufferedLogSink:
             await self.flush()
 
     async def flush(self) -> None:
-        """刷新缓冲区"""
         async with self._lock:
             if not self._buffer:
                 return

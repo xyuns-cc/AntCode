@@ -1641,12 +1641,6 @@
     },
     {
       "path": "services/worker/src/antcode_worker/executor/base.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 426
-    },
-    {
-      "path": "services/worker/src/antcode_worker/executor/base.py",
       "function": "BaseExecutor._create_result",
       "rule": "POSITIONAL_ARGS",
       "value": 8
@@ -1655,7 +1649,7 @@
       "path": "services/worker/src/antcode_worker/executor/process.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 698
+      "value": 611
     },
     {
       "path": "services/worker/src/antcode_worker/executor/process.py",

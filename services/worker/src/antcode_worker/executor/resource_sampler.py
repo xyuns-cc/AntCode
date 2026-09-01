@@ -1,9 +1,8 @@
-"""进程树资源采样。
+"""进程树资源采样（必须按整棵树求和）。
 
-B8: 启用沙箱后 ``asyncio.subprocess.Process.pid`` 指向的只是 ``bwrap`` 外壳进程
-（rule 场景外面还多包一层 relay），真正跑用户代码的是它的子孙进程。若只读根进程的
-``memory_info().rss``，结果永远只有几 MB，内存/CPU 超限判定因此永不成立、主动 kill
-形同虚设。这里统一按整棵进程树求和。
+B8: 启用沙箱后 ``asyncio.subprocess.Process.pid`` 指向的只是 ``bwrap`` 外壳进程（rule
+场景外面还多包一层 relay），只读根进程的 ``memory_info().rss`` 永远只有几 MB，超限判定
+因此永不成立、主动 kill 形同虚设。
 """
 
 from __future__ import annotations
@@ -17,14 +16,11 @@ from antcode_worker.executor.sandbox_scratch import SANDBOX_TMPFS_MOUNTS
 
 _BYTES_PER_MIB = 1024 * 1024
 
-# 沙箱自建的全部内存盘。它们的页计入容器 memory cgroup，却**不进任何进程的 RSS**
-# （write() 写下去的页没有被映射），所以下面的 RSS 求和永远看不见它们。这里单独采
-# 一份，为的是在任务撞上限额时能说清"撞的是哪一个挂载点"。
+# 沙箱内存盘的页计入容器 memory cgroup 却**不进任何进程的 RSS**，下面的 RSS 求和永远
+# 看不见它们，故单独采一份，用来说清"撞的是哪一个挂载点"。
 #
-# 清单直接取 sandbox_scratch 那一份，不在这里重抄：拦截侧（/tmp、/dev/shm 由 --size
-# 限，/ 与 /dev 由 --remount-ro 封）与归因侧一旦分叉，就会出现"限住了却看不见"——
-# / 与 /dev 之前正是这样漏掉的，它们不在采样范围里，写进去连归因都没有。封读写之后
-# 这两项应当恒为 0；读到非 0 就说明封读写回退了。
+# 清单直接取 sandbox_scratch 不重抄：拦截侧与归因侧一旦分叉就会"限住了却看不见"。
+# / 与 /dev 被 --remount-ro 封读写之后应当恒为 0；读到非 0 就说明封读写回退了。
 _SCRATCH_MOUNTS = SANDBOX_TMPFS_MOUNTS
 
 
@@ -57,13 +53,10 @@ class ProcessTreeUsage:
 
 
 def sample_process_tree(root: psutil.Process) -> ProcessTreeUsage | None:
-    """汇总 ``root`` 及其全部子孙进程的 CPU 时间与 RSS。
+    """汇总 ``root`` 及其全部子孙进程的 CPU 时间与 RSS；``None`` 表示整棵树已不存在。
 
-    返回 ``None`` 表示整棵树在采样时已经不存在（进程正常结束）。
-
-    进程在遍历过程中消失是正常竞态（``ZombieProcess`` 是 ``NoSuchProcess`` 的子类），
-    跳过该成员即可；其余异常（如 ``AccessDenied``）说明采样结果不可信，一律上抛，
-    绝不返回一个偏小的用量把超限判定悄悄绕过去。
+    进程在遍历中消失是正常竞态，跳过该成员即可；其余异常（如 ``AccessDenied``）说明采样
+    不可信，一律上抛，绝不返回一个偏小的用量把超限判定悄悄绕过去。
     """
     members = _collect_tree(root)
     if members is None:
@@ -109,9 +102,9 @@ def _worker_scratch_devices() -> frozenset[int]:
 def _sample_scratch(pid: int, own_devices: frozenset[int]) -> dict[int, _ScratchSample]:
     """读某个进程所在挂载命名空间里的内存盘用量，按设备号去重。
 
-    进程树的根是 bwrap 外壳，它留在 Worker 自己的挂载命名空间里，读到的是 Worker 的
-    /tmp；必须按 st_dev 把它排除，否则会把 Worker 自己的临时文件算到任务头上。真机实测
-    同一棵树：外壳 pid 读到 0.0MB，命名空间内的三个 pid 都读到 700.0MB。
+    进程树的根是 bwrap 外壳，留在 Worker 自己的挂载命名空间里读到的是 Worker 的 /tmp，
+    必须按 st_dev 排除，否则会把 Worker 的临时文件算到任务头上。实测同一棵树：外壳 pid
+    读到 0.0MB，命名空间内的三个 pid 都读到 700.0MB。
     """
     found: dict[int, _ScratchSample] = {}
     for mount in _SCRATCH_MOUNTS:
@@ -124,9 +117,8 @@ def _sample_scratch(pid: int, own_devices: frozenset[int]) -> dict[int, _Scratch
 def _read_scratch_mount(path: str, own_devices: frozenset[int]) -> _ScratchSample | None:
     """读不到就返回 None：进程随时会消失，未启用沙箱时也压根没有独立的内存盘。
 
-    这与 ``_sample_member`` 的 AccessDenied 上抛不是一回事——RSS 采少了会让超限判定
-    失效，而这里采不到只是少一条**归因**信息，拦截由挂载本身兑现（/tmp 与 /dev/shm 的
-    ``--size``、/ 与 /dev 的 ``--remount-ro``，见 sandbox_scratch）。
+    与 ``_sample_member`` 的 AccessDenied 上抛不是一回事——RSS 采少了会让超限判定失效，
+    而这里采不到只是少一条**归因**，拦截由挂载本身兑现（见 sandbox_scratch）。
     """
     try:
         device = os.stat(path).st_dev
