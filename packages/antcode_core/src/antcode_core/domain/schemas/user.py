@@ -47,7 +47,16 @@ def _validate_role_value(role: str | None) -> None:
 
 
 def _validate_role_admin_consistency(is_admin: bool | None, role: str | None) -> None:
-    """is_admin 与 role 必须一致，防客户端注入不一致组合。"""
+    """is_admin 与 role 必须一致，防客户端注入不一致组合。
+
+    ``is_admin=True`` 而 ``role`` 缺省是**欠定**，不是"默认普通用户"：``role`` 是
+    权限的唯一权威（``User._sync_admin_flag`` 按它反推 ``is_admin``），而管理员有
+    admin / super_admin 两种，一个布尔位推不出是哪一种。这里以前直接放行，请求会
+    带着 ``role=user`` 落库、``is_admin`` 被翻回 False，却仍回 201「创建成功」——
+    权限字段上的静默降级。改为显式拒绝，由调用方指明 role。
+    """
+    if is_admin and role is None:
+        raise ValueError("is_admin=true 时必须显式提供 role：admin 或 super_admin")
     if is_admin is None or role is None:
         return
     role_says_admin = role in _ADMIN_ROLES
