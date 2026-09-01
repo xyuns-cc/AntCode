@@ -459,12 +459,6 @@
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 338
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/scheduler/retry_service.py",
       "function": "_RetryQueueBackend.requeue",
       "rule": "PLR2004",
       "value": 1

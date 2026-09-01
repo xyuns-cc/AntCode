@@ -1,18 +1,8 @@
-"""任务重试与补偿服务
+"""重试查询/手动重试服务(web_api 侧)
 
-**P1-18 修复**:原实现把 pending retries 存到进程内 in-memory 队列,
-Master 重启 / Leader 切换会永久丢失重试(retry 实际是 at-most-once)。
-
-现在改用 Redis ZSet ``{ns}:retry:pending`` 做持久化 scheduled queue:
-
-- ``_drain_due_retries`` 每秒 tick,用 **原子** Lua 脚本
-  (``_RETRY_CLAIM_LUA``) 一步完成 ZRANGEBYSCORE+ZREM+HSET,把 claim 出的
-  payload 挪到 ``{ns}:retry:processing`` hash(field=payload, value=claim_ms);
-  处理成功后 ``HDEL``。
-- 崩溃恢复:每轮 tick 先扫 processing hash,把 claim 超过
-  ``RETRY_PROCESSING_TIMEOUT_SEC``(默认 60s)的条目 requeue 回 ZSet,防止
-  claim 后崩溃导致的补派丢失。
-- Master 重启/切主:ZSet 数据还在 Redis,新的 Leader 直接从 Redis 拿。
+重试队列的**消费者**只有 Master 的 ``antcode_master.control.retry_loop``:
+它在 Leader 门禁下 claim ``{ns}:retry:pending``,并按 durable intent 的血缘
+创建新 run。本模块只做请求作用域内的读与取消,不消费队列。
 """
 
 from __future__ import annotations
@@ -233,26 +223,6 @@ class RetryService:
 
     def __init__(self):
         self._backend = _RetryQueueBackend()
-        self._running = False
-        self._worker_task: asyncio.Task | None = None
-
-    async def start(self):
-        """启动重试服务"""
-        self._running = True
-        self._worker_task = asyncio.create_task(self._drain_due_retries())
-        logger.info("任务重试服务已启动 (Redis ZSet 持久化)")
-
-    async def stop(self):
-        """停止重试服务"""
-        self._running = False
-        if self._worker_task is not None and not self._worker_task.done():
-            self._worker_task.cancel()
-            try:
-                await self._worker_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._worker_task = None
-        logger.info("任务重试服务已停止")
 
     async def manual_retry(self, run_id, user_id):
         """手动重试通过事务服务创建新 run，历史 run 保持不可变。"""
@@ -267,59 +237,6 @@ class RetryService:
     async def cancel_pending(self, run_id: str) -> int:
         """把待重试意图从 Redis pending 队列移除（配合 DB 清 next_retry_at）。"""
         return await self._backend.cancel(run_id)
-
-    async def _drain_due_retries(self):
-        """处理重试队列 —— 从 Redis ZSet 原子 claim,处理成功后 ack。
-
-        P1-18: 每轮先 sweep_stalled 恢复崩溃遗留,再 claim 到期任务。
-        Master 重启/切主后 ZSet 数据仍在 Redis,新 Leader 直接接管。
-        """
-        # 崩溃恢复的扫描间隔(每 N 轮 tick 扫一次,避免每秒都 HGETALL)
-        sweep_every_n = 10
-        tick_counter = 0
-
-        while self._running:
-            try:
-                tick_counter += 1
-                if tick_counter % sweep_every_n == 1:
-                    # 崩溃恢复: 把 processing hash 里超时的 claim requeue
-                    try:
-                        await self._backend.sweep_stalled()
-                    except Exception as exc:
-                        logger.warning(f"retry sweep_stalled 异常: {exc}")
-
-                try:
-                    claimed = await self._backend.claim_due(limit=32)
-                except Exception as exc:
-                    logger.error(f"retry claim_due 异常: {exc}")
-                    await asyncio.sleep(1)
-                    continue
-
-                if not claimed:
-                    await asyncio.sleep(1.0)
-                    continue
-
-                for item in claimed:
-                    raw_payload = item.get("__raw_payload", "")
-                    task_id = item.get("task_id")
-                    try:
-                        from antcode_core.application.services.scheduler import (
-                            scheduler_service,
-                        )
-
-                        await scheduler_service.trigger_task(task_id)
-                        logger.info(f"任务 {task_id} 重试已触发")
-                        await self._backend.ack(raw_payload)
-                    except Exception as exc:
-                        # trigger 失败: requeue 一次(带短延迟),留到下轮
-                        logger.error(f"trigger_task({task_id}) 失败,requeue: {exc}")
-                        await self._backend.requeue(raw_payload, delay_seconds=5)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"处理重试队列失败: {e}")
-                await asyncio.sleep(1)
 
     async def get_retry_stats(self, task_id):
         """获取任务重试统计"""
