@@ -1601,19 +1601,7 @@
       "path": "services/worker/src/antcode_worker/app/wiring.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 706
-    },
-    {
-      "path": "services/worker/src/antcode_worker/app/wiring.py",
-      "function": "_require_success_response",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "services/worker/src/antcode_worker/app/worker_registration.py",
-      "function": "_require_success_response",
-      "rule": "PLR2004",
-      "value": 1
+      "value": 699
     },
     {
       "path": "services/worker/src/antcode_worker/cli.py",

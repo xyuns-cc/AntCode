@@ -17,6 +17,7 @@ from antcode_core.common.utils.worker_request import (
 )
 from loguru import logger
 
+from antcode_worker.app.control_plane_rejection import require_success_body
 from antcode_worker.app.http_trust import certificate_authority
 from antcode_worker.services.credential import WorkerCredentials
 from antcode_worker.services.credential.registration_intent import (
@@ -39,7 +40,7 @@ def register_by_install_key(config: Any, credential_service: Any) -> WorkerCrede
         if existing is not None:
             _ack_and_finish(intent, existing, credential_service)
             return existing
-        credentials = _send_registration(intent)
+        credentials = _send_registration(intent, credential_service.store.describe_location())
         credential_service.save(credentials)
         _ack_and_finish(intent, credentials, credential_service)
         logger.info("安装 Key V2 注册成功且已确认: worker_id={}", credentials.worker_id)
@@ -102,7 +103,7 @@ def _registration_request(config: Any) -> RegistrationRequest:
     )
 
 
-def _send_registration(intent: RegistrationIntent) -> WorkerCredentials:
+def _send_registration(intent: RegistrationIntent, credentials_at: str) -> WorkerCredentials:
     request = intent.request
     payload = {
         "key": intent.install_key,
@@ -118,7 +119,7 @@ def _send_registration(intent: RegistrationIntent) -> WorkerCredentials:
     }
     url = f"{request.api_base_url}/api/v1/workers/register-by-key-v2"
     response = _post_json(url, encode_worker_json_body(payload))
-    data = _require_success_response(response, operation="安装 Key V2 注册")
+    data = _require_registration_data(response, operation="安装 Key V2 注册", credentials_at=credentials_at)
     _validate_registration_response(data, intent.registration_id)
     return WorkerCredentials(
         worker_id=str(data["worker_id"]),
@@ -149,7 +150,11 @@ def _ack_and_finish(
         body=body,
     )
     response = _post_json(url, body, headers=headers)
-    _require_success_response(response, operation="Worker 注册 ACK")
+    _require_registration_data(
+        response,
+        operation="Worker 注册 ACK",
+        credentials_at=credential_service.store.describe_location(),
+    )
     credential_service.finish_registration()
 
 
@@ -164,17 +169,15 @@ def _post_json(url: str, body: bytes, *, headers: dict[str, str] | None = None) 
         return client.post(url, content=body, headers=request_headers)
 
 
-def _require_success_response(response: httpx.Response, *, operation: str) -> dict[str, Any]:
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise RuntimeError(f"{operation}返回非 JSON 响应") from exc
-    if response.status_code >= 400:
-        detail = body.get("message") or body.get("detail") if isinstance(body, dict) else None
-        raise RuntimeError(detail or f"{operation}失败 (HTTP {response.status_code})")
-    if not isinstance(body, dict) or not body.get("success"):
-        message = body.get("message") if isinstance(body, dict) else None
-        raise RuntimeError(message or f"{operation}失败")
+def _require_registration_data(response: httpx.Response, *, operation: str, credentials_at: str) -> dict[str, Any]:
+    """注册链路同样经 ``require_success_body`` 归因。
+
+    注册 ACK 是**已签名**请求，且 ``resume_registration_ack`` 在每次启动都跑（两种
+    传输模式都跑）：注册后、ACK 前崩溃过的 Worker 会留下意图文件，控制面库随后被
+    重建，这次 ACK 就会拿到 ``WORKER_AUTH_IDENTITY_UNKNOWN``。这里以前只把服务端
+    文案原样抛出，丢掉了结构化码，也就报不出该清哪一份本地凭据。
+    """
+    body = require_success_body(response, operation=operation, credentials_at=credentials_at)
     data = body.get("data")
     if not isinstance(data, dict):
         raise RuntimeError(f"{operation}返回数据不完整")

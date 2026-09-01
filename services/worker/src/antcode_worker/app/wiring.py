@@ -12,7 +12,7 @@ from typing import Any
 
 from loguru import logger
 
-from antcode_worker.app.control_plane_rejection import control_plane_error
+from antcode_worker.app.control_plane_rejection import require_success_body
 
 
 @dataclass
@@ -314,8 +314,14 @@ def _require_control_credentials(config: Any, credential_service: Any, credentia
     这是**刻意**的：控制面若拒绝这份身份（例如库被重建后 worker_id 已不存在），
     正确动作是带着可执行指令硬失败，而不是自动拿安装 Key 重注册——安装 Key 一次性
     （ACK 后恢复窗口永久关闭，库重建后 Key 记录本身也没了），且"被拒就自己回来"
-    会打穿管理员删除/停用 Worker 这条撤销手段。真正的报错在 Direct ACL 签发那一步
-    由 ``control_plane_rejection`` 给出，见该模块的 ``_REREGISTRATION_IS_MANUAL``。
+    会打穿管理员删除/停用 Worker 这条撤销手段。
+
+    **谁来给那句可执行的报错，取决于传输模式**：Direct 模式在 ACL 签发那一步、
+    Gateway 模式在残留的注册 ACK 那一步，由 ``control_plane_rejection`` 给出。
+    但**稳态 Gateway Worker 一次签名 HTTP 请求都不发**（租约/心跳/派发全走 gRPC），
+    它在库重建后先撞上的是 Gateway 拦截器的 ``UNAUTHENTICATED 认证失败: 无效的
+    API Key``，最终以 ``RuntimeError("传输层启动失败")`` 退出——那条链路目前没有
+    结构化归因，见 ``control_plane_rejection`` 模块文档的适用范围一段。
     """
     if not required or (credentials and credentials.is_valid()):
         return credentials
@@ -444,7 +450,7 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
     )
     with client:
         response = client.post(url, content=request_body, headers=headers)
-    response_body = _require_success_response(
+    response_body = require_success_body(
         response, operation="Direct Redis ACL 签发", credentials_at=credential_service.store.describe_location()
     )
     data = response_body.get("data") or {}
@@ -456,19 +462,6 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
     if not credential_service.save(updated):
         raise RuntimeError("Direct Redis ACL 已轮换，但新凭据持久化失败")
     return updated
-
-
-def _require_success_response(response: Any, *, operation: str, credentials_at: str) -> dict[str, Any]:
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise RuntimeError(f"{operation}返回非 JSON 响应") from exc
-    if response.status_code >= 400:
-        raise control_plane_error(body, response.status_code, operation=operation, credentials_at=credentials_at)
-    if not isinstance(body, dict) or not body.get("success"):
-        message = body.get("message") if isinstance(body, dict) else None
-        raise RuntimeError(message or f"{operation}失败")
-    return body
 
 
 def _create_runtime_manager(config: Any) -> Any:

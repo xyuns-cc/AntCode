@@ -6,8 +6,10 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from antcode_core.common.security import verify_hmac_signature
+from antcode_core.common.security.worker_auth_reasons import WorkerAuthReason
 from antcode_core.common.utils.worker_request import HTTP_POST_METHOD, request_path_from_url
 from antcode_worker.app import wiring
+from antcode_worker.app.control_plane_rejection import ControlPlaneIdentityUnknown
 from antcode_worker.app.worker_registration import resume_registration_ack
 from antcode_worker.services.credential.persistent_store import PersistentCredentialStore
 from antcode_worker.services.credential.registration_intent import RegistrationRequest
@@ -183,6 +185,67 @@ def test_restart_with_saved_credentials_only_retries_registration_ack(monkeypatc
 
     assert calls == ["https://control.example.com/api/v1/workers/worker-001/registration-ack"]
     assert not (tmp_path / "secrets" / "worker_registration_intent.json").exists()
+
+
+def _resume_ack_against_rejection(monkeypatch, tmp_path: Path, error_code: str):
+    """走真实的 ``resume_registration_ack`` 调用链，只把 ACK 回包换成控制面的拒绝。
+
+    这是 **Gateway 模式** Worker 唯一会发出的已签名 HTTP 请求：注册后、ACK 前崩溃
+    过的机器每次启动都重发它，控制面库随后被重建就会撞上身份不存在。
+    """
+    store = PersistentCredentialStore(tmp_path)
+    with store.registration_session("install-key", _registration_request()) as intent:
+        assert intent is not None
+        credentials = replace(_credentials(), registration_id=intent.registration_id)
+        CredentialService(store).save(credentials)
+
+    class Client:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def post(self, _url, *, content, headers=None):
+            return httpx.Response(
+                401,
+                json={"success": False, "message": "控制面不认识该 Worker 身份", "data": {"error_code": error_code}},
+            )
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    with pytest.raises(RuntimeError) as exc_info:
+        resume_registration_ack(CredentialService(store), credentials)
+    return exc_info.value, store
+
+
+def test_registration_ack_identity_loss_names_the_credential_file_to_clear(monkeypatch, tmp_path: Path) -> None:
+    """注册链路与运行时链路必须给出同一句可执行指令，不能只有其中一份接了归因。"""
+    error, store = _resume_ack_against_rejection(
+        monkeypatch,
+        tmp_path,
+        WorkerAuthReason.IDENTITY_UNKNOWN.value,
+    )
+
+    assert isinstance(error, ControlPlaneIdentityUnknown)
+    assert str(store.path) in str(error)
+    assert "重新注册" in str(error)
+    # 意图文件不得被清：ACK 从未成功，清掉它等于把"还没确认"记成"已确认"。
+    assert (tmp_path / "secrets" / "worker_registration_intent.json").exists()
+
+
+def test_registration_ack_signature_rejection_is_not_reported_as_identity_loss(monkeypatch, tmp_path: Path) -> None:
+    """反面：签名不符不得被翻译成"清凭据重新注册"，那会白毁一份仍然有效的身份。"""
+    error, store = _resume_ack_against_rejection(
+        monkeypatch,
+        tmp_path,
+        WorkerAuthReason.SIGNATURE_INVALID.value,
+    )
+
+    assert not isinstance(error, ControlPlaneIdentityUnknown)
+    assert str(store.path) not in str(error)
 
 
 def test_install_key_registration_does_not_send_when_store_is_not_durable(monkeypatch) -> None:

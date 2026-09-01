@@ -1,4 +1,4 @@
-"""把控制面对已签名请求的拒绝，翻译成 Worker 侧可执行的运维动作。
+"""把控制面对已签名 **HTTP** 请求的拒绝，翻译成 Worker 侧可执行的运维动作。
 
 Worker 以前只是把服务端的 ``message`` 原样抛成 ``RuntimeError``。控制面库被重建
 或回滚到注册之前时，本地凭据结构上仍然合法（字段齐全、格式对），但库里已经没有
@@ -8,6 +8,13 @@ Worker 以前只是把服务端的 ``message`` 原样抛成 ``RuntimeError``。�
 
 判据只看服务端回包里的结构化 ``data.error_code``，绝不匹配文案：仓里有
 ``"NOSCRIPT" in str(exc)`` 这样的 P0 前科（错误串被上游改写后判定恒为假）。
+
+**适用范围仅限走 HMAC 签名的 HTTP 控制面调用**，即 Direct Redis ACL 签发与注册
+ACK 两处。**Gateway 传输的 gRPC 链路不经过这里**：它在 ``AuthInterceptor`` 里按
+``verify_api_key`` 的布尔结果 ``abort(UNAUTHENTICATED, "认证失败: 无效的 API Key")``，
+既不区分"身份不存在"与"密钥不对"，也不带任何 trailing metadata，因此 Gateway 模式
+的 Worker 在库重建后看到的仍是"检查 WORKER_API_KEY 配置"这类误导。要覆盖它必须
+先让 gRPC 侧能携带结构化码，那是 gateway 与 antcode_core 的改动，不在本模块范围。
 
 **这里刻意不自动重新注册**，原因写在 ``_REREGISTRATION_IS_MANUAL`` 上。
 """
@@ -19,6 +26,8 @@ from typing import Any
 from antcode_core.common.security.worker_auth_reasons import WorkerAuthReason
 
 _ERROR_CODE_FIELD = "error_code"
+#: 控制面的拒绝一律以 4xx/5xx 表达；2xx 但 ``success=false`` 是另一类（业务失败），分开处理。
+_FIRST_ERROR_STATUS_CODE = 400
 
 #: 恢复只能人工，不能由 Worker 自动完成，有三条各自独立的理由：
 #: 1. 安装 Key 是一次性的：注册 ACK 之后恢复窗口永久关闭（服务端
@@ -49,6 +58,29 @@ def control_plane_error(body: Any, status_code: int, *, operation: str, credenti
     return RuntimeError(message or f"{operation}失败 (HTTP {status_code})")
 
 
+def require_success_body(response: Any, *, operation: str, credentials_at: str) -> dict[str, Any]:
+    """把控制面回包收敛成成功体，失败一律经 ``control_plane_error`` 归因。
+
+    注册链路（注册 ACK）与运行时链路（Direct ACL 签发）以前各自持有一份同名的
+    ``_require_success_response``，只有运行时那份接了结构化归因；两份都在 Worker
+    启动路径上、都发已签名请求、都能收到同一个 ``WORKER_AUTH_IDENTITY_UNKNOWN``，
+    差别只是哪一次请求先发出去。合并成一份是为了让"拒绝原因怎么翻译"只有一个答案。
+    """
+    body = _decode_json(response, operation)
+    if response.status_code >= _FIRST_ERROR_STATUS_CODE:
+        raise control_plane_error(body, response.status_code, operation=operation, credentials_at=credentials_at)
+    if not isinstance(body, dict) or not body.get("success"):
+        raise RuntimeError(_response_message(body) or f"{operation}失败")
+    return body
+
+
+def _decode_json(response: Any, operation: str) -> Any:
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError(f"{operation}返回非 JSON 响应") from exc
+
+
 def _response_message(body: Any) -> str:
     if not isinstance(body, dict):
         return ""
@@ -64,4 +96,4 @@ def _error_code(body: Any) -> str:
     return str(data.get(_ERROR_CODE_FIELD) or "")
 
 
-__all__ = ["ControlPlaneIdentityUnknown", "control_plane_error"]
+__all__ = ["ControlPlaneIdentityUnknown", "control_plane_error", "require_success_body"]
