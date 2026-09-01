@@ -60,7 +60,6 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "user_sessions",
     "scheduler_outbox",
     "scheduler_authority",
-    "antcode_data_migrations",
 )
 
 _TABLE_EXISTS_SQL = """
@@ -108,12 +107,6 @@ async def _align_database_integrity() -> None:
         removed_indexes = await align_database_integrity(connection)
     for index_name in removed_indexes:
         logger.info("已删除重复 public_id 普通索引: {}", index_name)
-
-
-async def _migrate_worker_credentials() -> None:
-    from scripts.migrate_worker_credentials import main as migrate_worker_credentials
-
-    await migrate_worker_credentials()
 
 
 async def _check_required_tables() -> None:
@@ -183,10 +176,6 @@ async def main() -> None:
     logger.info("目标 DB: {}", os.environ["DATABASE_URL"].split("@")[-1])
     await _generate_schemas()
     await _align_database_integrity()
-    await _migrate_worker_credentials()
-    from scripts.encrypt_sensitive_data import main as encrypt_sensitive_data
-
-    await encrypt_sensitive_data()
     await _check_required_tables()
     await _create_performance_indexes()
     await _validate_schema_contracts()

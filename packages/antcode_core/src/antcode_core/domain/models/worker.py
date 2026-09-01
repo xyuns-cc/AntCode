@@ -125,8 +125,8 @@ class Worker(BaseModel):
     class Meta:
         table = "workers"
         # 认证热路径 ``verify_api_key`` 每次调用都按哈希列查询，缺索引会顺序扫描
-        # 整张 workers 表。索引名与 ``migrations/models/*.sql`` 及
-        # ``scripts/init_db_current_schema.py`` 保持一致，避免两套真源各建一份。
+        # 整张 workers 表。索引名与 ``scripts/init_db_current_schema.py`` 保持一致，
+        # 避免两套真源各建一份。
         indexes = [
             ("name",),
             ("host", "port"),

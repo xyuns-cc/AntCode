@@ -2,12 +2,6 @@ DO $verify_data$
 DECLARE
     inconsistent_admins BIGINT;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM public.antcode_data_migrations
-         WHERE name = '20260730_encrypt_sensitive_fields_v1'
-    ) THEN
-        RAISE EXCEPTION 'required sensitive-data migration ledger entry is missing';
-    END IF;
     IF (SELECT COUNT(DISTINCT config_key) FROM public.system_configs
          WHERE config_key IN ('brand_name', 'app_title') AND is_active) <> 2 THEN
         RAISE EXCEPTION 'required active system configuration is missing';

@@ -1,10 +1,8 @@
 """任务执行日志模型（``task_logs`` 表）。
 
-P1-01 修复：此前依赖"迁移 37 add_task_logs"手工建表，但 ``migrations/models/``
-下只有 README，新部署经 ``scripts/init_db.py`` +
-``Tortoise.generate_schemas`` 走 model → DDL 的路线时并没有对应的 ORM
-model，导致 ``task_logs`` 表**根本不建**。所有对该表的裸 SQL 读写都会
-在新集群启动即失败，日志页面永远空。
+P1-01 修复：此前没有对应的 ORM model，``scripts/init_db.py`` +
+``Tortoise.generate_schemas`` 走 model → DDL 的路线时 ``task_logs`` 表
+**根本不建**，所有对该表的裸 SQL 读写在新集群启动即失败，日志页面永远空。
 
 本 model 与 ``application/services/logs/postgres_log_service.py`` 里
 ``INSERT INTO "task_logs" (event_id, run_id, log_type, content, sequence,

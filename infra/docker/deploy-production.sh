@@ -122,7 +122,5 @@ if [[ "$UPGRADE_MODE" == "existing-upgrade" && "$apply_requested" != true ]]; th
 fi
 
 "${compose[@]}" run --rm --no-deps migration
-"${compose[@]}" run --rm --no-deps migration \
-    python -m scripts.migrate_worker_install_keys
 
 "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT"

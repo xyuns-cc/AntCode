@@ -63,27 +63,6 @@ def test_repository_subdir_can_back_multiple_projects():
     assert ("repository_id", "subdir") not in unique_together
 
 
-def test_shared_project_source_has_sql_migration():
-    migration = REPO_ROOT / "migrations/models/20260812_allow_shared_project_sources.sql"
-    sql = migration.read_text(encoding="utf-8")
-
-    assert "DROP CONSTRAINT" in sql
-    assert "\\gexec" in sql
-    assert "NOT index_row.indisunique" in sql
-    assert "index_row.indisvalid" in sql
-    assert "index_row.indisready" in sql
-    assert "access_method.amname = 'btree'" in sql
-    assert "idx_project_sources_repository_subdir" in sql
-
-
-def test_project_source_mirror_removal_has_sql_migration():
-    migration = REPO_ROOT / "migrations/models/20260711_remove_project_source_mirrors.sql"
-    sql = migration.read_text(encoding="utf-8")
-
-    assert 'DROP COLUMN IF EXISTS "entry_point"' in sql
-    assert 'DROP COLUMN IF EXISTS "runtime_config"' in sql
-
-
 def test_project_service_never_writes_project_file_source_mirrors():
     source = (
         REPO_ROOT / "packages/antcode_core/src/antcode_core/application/services/projects/project_service.py"

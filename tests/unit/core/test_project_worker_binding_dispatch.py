@@ -24,7 +24,6 @@ RUNTIME_WORKER_INTERNAL_ID = 1
 OTHER_WORKER_INTERNAL_ID = 2
 RUNTIME_WORKER_PUBLIC_ID = "ac696e6847ea4dc298a7dbca78bed0d2"
 ENV_NAME = "shared-py311"
-MIGRATION = Path("migrations/models/20260818_backfill_project_bound_worker.sql")
 
 
 class _FakeProject:
@@ -104,18 +103,6 @@ async def test_prefer_strategy_falls_back_to_auto_select_when_nothing_is_bound(m
 
     assert await resolver._resolve_prefer_bound(project, task=SimpleNamespace(user_id=1)) is picked
     auto_select.assert_awaited_once()
-
-
-def test_backfill_migration_respects_explicit_unbinding() -> None:
-    sql = MIGRATION.read_text(encoding="utf-8")
-
-    assert "UPDATE public.projects" in sql
-    assert "bound_worker_id = worker.id" in sql
-    # 只补 NULL，不覆盖已有绑定；auto 策略的 NULL 是显式意图，不能被回填推翻。
-    assert "project.bound_worker_id IS NULL" in sql
-    assert "project.execution_strategy <> 'auto'" in sql
-    # 悬空 worker_id 必须显式报错，不能静默留在库里。
-    assert "RAISE EXCEPTION" in sql
 
 
 def test_binding_has_no_silent_read_side_fallback() -> None:

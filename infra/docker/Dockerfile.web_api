@@ -93,7 +93,6 @@ COPY --chown=appuser:appgroup \
     scripts/crawl_redis_upgrade_execution.py \
     scripts/crawl_redis_upgrade_migration.py \
     scripts/crawl_redis_upgrade_scan.py \
-    scripts/encrypt_sensitive_data.py \
     scripts/init_db.py \
     scripts/init_db_current_schema.py \
     scripts/init_db_environment.py \
@@ -101,13 +100,10 @@ COPY --chown=appuser:appgroup \
     scripts/init_db_schema_contracts.py \
     scripts/init_db_schema_upgrades.py \
     scripts/init_db_schema_validation.py \
-    scripts/migrate_worker_credentials.py \
-    scripts/migrate_worker_install_keys.py \
     scripts/migrate_crawl_redis.py \
     scripts/rotate_encryption_key.py \
     scripts/rotate_worker_hmac_encryption_key.py \
     /app/scripts/
-COPY --chown=appuser:appgroup migrations/models /app/migrations/models
 COPY --chmod=0555 infra/docker/entrypoint.load-secrets.sh /usr/local/bin/antcode-load-secrets
 
 # 创建数据目录并设置权限

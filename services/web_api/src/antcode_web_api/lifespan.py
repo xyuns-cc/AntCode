@@ -155,7 +155,7 @@ async def shutdown_services() -> None:
 
 
 async def _init_db() -> None:
-    """初始化数据库连接；结构变更必须通过 migrations/models 执行。"""
+    """初始化数据库连接；建表只由 scripts/init_db.py 负责。"""
     try:
         await Tortoise.init(config=get_default_tortoise_config(service="web_api"))
         logger.info("数据库连接已初始化")

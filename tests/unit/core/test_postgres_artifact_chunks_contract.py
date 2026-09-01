@@ -62,14 +62,6 @@ def test_artifact_store_splits_content_into_ordered_chunks():
     assert chunks == [b"a" * ARTIFACT_CHUNK_SIZE_BYTES, b"aaa"]
 
 
-def test_legacy_artifact_blob_table_is_not_created():
-    from pathlib import Path
-
-    migrations = "\n".join(path.read_text(encoding="utf-8") for path in Path("migrations/models").glob("*.py"))
-
-    assert "artifact_blobs" not in migrations
-
-
 @pytest.mark.asyncio
 async def test_write_blob_inserts_artifact_and_chunks_in_same_transaction():
     content = b"payload"

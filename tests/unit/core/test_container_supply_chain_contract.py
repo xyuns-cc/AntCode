@@ -110,7 +110,6 @@ def test_web_api_image_contains_database_initializer():
 
     for path in (
         "scripts/__init__.py",
-        "scripts/encrypt_sensitive_data.py",
         "scripts/init_db.py",
         "scripts/init_db_current_schema.py",
         "scripts/init_db_environment.py",
@@ -118,11 +117,8 @@ def test_web_api_image_contains_database_initializer():
         "scripts/init_db_schema_contracts.py",
         "scripts/init_db_schema_upgrades.py",
         "scripts/init_db_schema_validation.py",
-        "scripts/migrate_worker_credentials.py",
-        "scripts/migrate_worker_install_keys.py",
         "scripts/rotate_encryption_key.py",
         "scripts/rotate_worker_hmac_encryption_key.py",
-        "migrations/models",
     ):
         assert path in dockerfile
     assert "/app/scripts/" in dockerfile

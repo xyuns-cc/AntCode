@@ -1,6 +1,5 @@
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -225,14 +224,6 @@ async def test_repeated_consumption_failure_gives_up_terminally():
 
     assert update["last_error"].startswith(OUTBOX_TERMINATED_PREFIX)
     assert "poison event" in update["last_error"]
-
-
-def test_scheduler_outbox_consumption_migration_has_claim_state():
-    migration = Path("migrations/models/20260713_add_scheduler_outbox_consumption.sql").read_text(encoding="utf-8")
-
-    assert '"consumed_at" TIMESTAMPTZ' in migration
-    assert '"consume_owner" VARCHAR(128)' in migration
-    assert '"consume_started_at" TIMESTAMPTZ' in migration
 
 
 @pytest.mark.asyncio

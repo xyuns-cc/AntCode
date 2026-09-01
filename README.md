@@ -90,7 +90,6 @@ services/           独立服务
 
 web/antcode-frontend/     # React + Antd 前端
 scripts/                  # init_db.py 等
-migrations/               # 首版无迁移，详见 migrations/models/README.md
 infra/docker/             # Docker 部署模板
 ```
 
@@ -98,7 +97,6 @@ infra/docker/             # Docker 部署模板
 的逐条注释是唯一的仓内说明来源：
 
 - [`infra/docker/README.md`](infra/docker/README.md) — 生产/开发 Compose 部署、升级、备份恢复
-- [`migrations/models/README.md`](migrations/models/README.md) — 建表与迁移脚本约定
 - [`services/worker/README.md`](services/worker/README.md) — Worker Direct / Gateway 传输模式
 - [`tests/README.md`](tests/README.md) — 各测试套件的依赖与执行方式
 - [`.env.example`](.env.example) / [`infra/docker/.env.example`](infra/docker/.env.example) — 全部配置项含义

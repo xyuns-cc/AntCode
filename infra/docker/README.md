@@ -235,8 +235,7 @@ JWT 和加密密钥全部通过 Docker secrets 只读挂载。应用镜像的固
 随后停止 writer、执行 Redis 门禁和数据库 migration；任一步失败都会中止，全部成功后才启动
 长期服务：
 
-数据库 migration 固定先执行标准 `scripts.init_db`，再在 writer 仍停止时执行
-`scripts.migrate_worker_install_keys`；两步都使用本轮构建出的同一个 Web API 镜像 tag。
+数据库 migration 执行标准 `scripts.init_db`，使用本轮构建出的 Web API 镜像 tag。
 
 全域主加密密钥轮换使用独立的显式模式，不会在普通部署中自动执行。该模式会构建镜像、停止所有 writer，
 依次执行离线 dry-run、apply 和 primary-only，并在成功后继续保持 writer 停止，供运维删除 legacy keyring：
@@ -278,8 +277,7 @@ infra/docker/deploy-production.sh .env.production existing-upgrade \
 ```
 
 `--apply` 缺少 `--preflight-reviewed`、既有升级缺少停写确认、报告有 blocker 或 Redis
-写入/校验失败、schema 或安装 Key 迁移失败都会返回非零，writer 保持停止。安装 Key
-迁移若找不到 pending Key 的 Redis 来源元数据也会明确失败，不会把来源限制降级为空。
+写入/校验失败、schema 初始化失败都会返回非零，writer 保持停止。
 独立 Worker 不属于控制面 Compose，
 脚本无法替运维方停止或证明其状态；`--confirm-writers-stopped` 是对所有外部 writer
 也已停机的明确确认。

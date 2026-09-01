@@ -126,8 +126,7 @@ def test_post_restore_sql_covers_schema_security_and_critical_data() -> None:
     assert "task_run_lease_generations" in schema
     assert "indisvalid" in schema and "indisready" in schema
     assert "fk_scheduled_tasks_project_id" in schema
-    assert "api_key_previous" in schema
-    assert "20260730_encrypt_sensitive_fields_v1" in critical_data
+    assert "secret_key_encrypted" in schema
     assert "COUNT(DISTINCT config_key)" in critical_data
     assert "restored_critical_row_counts" in critical_data
 

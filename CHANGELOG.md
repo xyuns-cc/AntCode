@@ -55,9 +55,8 @@
 
 ### 数据库
 
-- **无 aerich 迁移链**：v1.0.0 一次性建表。
+- **无迁移链**：v1.0.0 由 ORM model 一次性建表，不携带任何存量库升级路径。
 - 一键初始化：`uv run python scripts/init_db.py`
-- 后续 schema 变更走手写 SQL 补丁或引入 aerich（见 [`migrations/models/README.md`](migrations/models/README.md)）
 
 ### 部署
 

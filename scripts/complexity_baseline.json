@@ -908,12 +908,6 @@
       "value": 1
     },
     {
-      "path": "scripts/migrate_lease_keys.py",
-      "function": "_read_snapshot",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "services/gateway/src/antcode_gateway/handlers/result.py",
       "function": "ResultHandler.handle_status_update",
       "rule": "POSITIONAL_ARGS",
@@ -3012,30 +3006,6 @@
       "function": "test_rule_pagination_is_dispatched_once_as_pending_base_run",
       "rule": "PLR2004",
       "value": 2
-    },
-    {
-      "path": "tests/unit/scripts/test_encrypt_sensitive_data.py",
-      "function": "test_rewrite_resaves_every_row_with_exact_encrypted_fields",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/scripts/test_migrate_lease_keys.py",
-      "function": "test_apply_restores_current_key_then_deletes_legacy_source",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/scripts/test_migrate_lease_keys.py",
-      "function": "test_main_requires_redis_url",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/scripts/test_migrate_worker_credentials.py",
-      "function": "test_migrate_rows_hashes_and_encrypts_real_credentials",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "tests/unit/scripts/test_run_worker.py",

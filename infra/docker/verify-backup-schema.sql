@@ -5,7 +5,6 @@ DECLARE
     missing_indexes TEXT[];
     invalid_indexes TEXT[];
     unvalidated_constraints TEXT[];
-    plaintext_worker_columns TEXT[];
 BEGIN
     SELECT array_agg(required_name ORDER BY required_name) INTO missing_tables
       FROM unnest(ARRAY[
@@ -18,8 +17,7 @@ BEGIN
         'system_configs', 'git_credentials', 'git_repositories',
         'source_artifacts', 'source_artifact_chunks', 'run_source_snapshots',
         'worker_performance_history', 'spider_metrics_history',
-        'user_worker_permissions', 'user_sessions', 'scheduler_outbox', 'scheduler_authority',
-        'antcode_data_migrations'
+        'user_worker_permissions', 'user_sessions', 'scheduler_outbox', 'scheduler_authority'
       ]) AS required(required_name)
      WHERE NOT EXISTS (
         SELECT 1 FROM information_schema.tables
@@ -104,14 +102,6 @@ BEGIN
            AND constraint_row.convalidated
     ) THEN
         RAISE EXCEPTION 'required scheduled_tasks -> projects RESTRICT foreign key is missing/incompatible';
-    END IF;
-
-    SELECT array_agg(column_name ORDER BY column_name) INTO plaintext_worker_columns
-      FROM information_schema.columns
-     WHERE table_schema = 'public' AND table_name = 'workers'
-       AND column_name IN ('api_key', 'secret_key', 'api_key_previous');
-    IF plaintext_worker_columns IS NOT NULL THEN
-        RAISE EXCEPTION 'legacy plaintext Worker credential columns remain: %', plaintext_worker_columns;
     END IF;
 END
 $verify_schema$;
