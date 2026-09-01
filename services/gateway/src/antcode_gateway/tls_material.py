@@ -35,6 +35,24 @@ fence 又只由人工运维动作触发，与 CA 吊销没有任何自动联动�
 （约 31us vs 约 2.4ms），换的是"内容不同必然被发现"。
 
 顺带消掉一类假阳性：单纯 ``touch`` 材料不再触发一次无谓的重载与 WARNING。
+
+**换料之前校验到哪一步**：``_validate`` 真解析，不看 PEM 标记在不在。原因是标记
+判据对真实的半写入完全无效——中断的写留下的是"BEGIN 头完整、body 截断、没有
+END"，标记查得到。实测五种坏材料都能骗过标记判据：截断证书、只剩 END 行的私钥、
+加密私钥、新私钥配旧证书、尾部追加到一半的 CA bundle。它们的共同后果不是"gRPC
+装上坏材料"——gRPC 会拒绝建 handshaker factory 并**沿用旧材料**——而是这里照样提交了
+指纹并打出 ``TLS_MATERIAL_RELOADED``：下一次回调判"没变"直接返回 ``None``，从此一条
+日志都没有，Gateway 带着旧材料静默跑到旧证书到期为止，而
+``release_e2e_tls_probe.reload_count`` 把这条日志计成一次成功轮换。
+
+校验因此覆盖 gRPC 装载时才会暴露的全部形态：证书链与 CA bundle 逐条解析得出来、
+私钥解析得出来且不带口令、证书与私钥是同一对。**它挡不住的**只有一种：截断恰好落在
+两个 PEM 块的边界上——那样得到的是一个语法完整、只是少了几张证书的 bundle，与"运维
+本来就想删掉那几张"在字节层面无从区分。
+
+代价不落在握手上：``_validate`` 只在指纹已经判出"变了"之后才跑，稳态握手一次都不
+碰它。单次校验的大头是 RSA-2048 私钥解析（本机实测约 43ms，OpenSSL 导入时会做密钥
+自洽性检查），只在真的换料时付一次。
 """
 
 from __future__ import annotations
@@ -46,6 +64,10 @@ from typing import Any
 
 import grpc
 from antcode_core.common.exceptions import ConfigurationError
+from cryptography import x509
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.types import PrivateKeyTypes
 from loguru import logger
 
 # 结构化失败码。日志与测试一律匹配这些常量，禁止匹配中文描述——描述会漂移。
@@ -55,10 +77,10 @@ TLS_MATERIAL_INVALID_PEM = "TLS_MATERIAL_INVALID_PEM"
 #: （材料没变时它一条都不该多），匹配中文描述会在下一次措辞调整时静默失效。
 TLS_MATERIAL_RELOADED = "TLS_MATERIAL_RELOADED"
 
-# PEM 边界标记。运维半写入 / 截断的文件如果直接换给 gRPC，全队 Worker 会在下一次
-# 握手集体失败；换之前先validate，坏材料一律不生效。
+#: 解析出的证书条数必须等于 BEGIN 头的条数。``load_pem_x509_certificates`` 会**静默
+#: 丢掉**尾部那个只写了一半的块（实测"完整 CA + 截断证书"照样返回 1 条），所以"解析
+#: 出至少一条"判不出 bundle 里少了一张 CA，要拿头的条数把它对上。
 PEM_CERTIFICATE_MARKER = b"-----BEGIN CERTIFICATE-----"
-PEM_PRIVATE_KEY_MARKER = b"PRIVATE KEY-----"
 
 #: 逐份材料的 SHA-256 摘要。为什么不是 stat 三元组见模块 docstring。
 _Fingerprint = tuple[bytes, ...]
@@ -88,13 +110,52 @@ class TlsMaterial:
     client_ca: bytes | None = None
 
 
+def _load_certificates(pem: bytes, subject: str) -> list[x509.Certificate]:
+    """真解析（与 ``tls_expiry`` 同一套 API），而不是查 PEM 标记在不在。
+
+    运维中断的写留下的恰恰是"BEGIN 头完整、body 截断、没有 END"，标记查得到、
+    内容用不了；按标记判必然放行。
+    """
+    try:
+        certificates = x509.load_pem_x509_certificates(pem)
+    except ValueError as exc:
+        raise ConfigurationError(f"{TLS_MATERIAL_INVALID_PEM}: {subject}不是可解析的 PEM 证书: {exc}") from exc
+    if len(certificates) != pem.count(PEM_CERTIFICATE_MARKER):
+        raise ConfigurationError(f"{TLS_MATERIAL_INVALID_PEM}: {subject}里有只写了一半的证书块")
+    return certificates
+
+
+def _load_private_key(pem: bytes) -> PrivateKeyTypes:
+    """加密私钥单列一条：gRPC 没有输入口令的入口，它解不开，装上去等于没装。
+
+    ``load_pem_private_key(..., password=None)`` 对加密私钥抛的正是 ``TypeError``，
+    所以这个分支不是猜的，它就是"这份材料带口令"的确切信号。
+    """
+    try:
+        return serialization.load_pem_private_key(pem, password=None)
+    except TypeError as exc:
+        raise ConfigurationError(f"{TLS_MATERIAL_INVALID_PEM}: 服务端私钥是加密私钥，gRPC 无法使用") from exc
+    except (UnsupportedAlgorithm, ValueError) as exc:
+        raise ConfigurationError(f"{TLS_MATERIAL_INVALID_PEM}: 服务端私钥不是可解析的 PEM 私钥: {exc}") from exc
+
+
+def _public_der(key: Any) -> bytes:
+    """公钥的规范化字节，用来判 cert 与 key 是不是同一对；DER 编码唯一，可直接比。"""
+    der: bytes = key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return der
+
+
 def _validate(material: TlsMaterial) -> None:
-    if PEM_CERTIFICATE_MARKER not in material.certificate:
-        raise ConfigurationError(f"{TLS_MATERIAL_INVALID_PEM}: 服务端证书不是 PEM 证书")
-    if PEM_PRIVATE_KEY_MARKER not in material.private_key:
-        raise ConfigurationError(f"{TLS_MATERIAL_INVALID_PEM}: 服务端私钥不是 PEM 私钥")
-    if material.client_ca is not None and PEM_CERTIFICATE_MARKER not in material.client_ca:
-        raise ConfigurationError(f"{TLS_MATERIAL_INVALID_PEM}: 客户端 CA bundle 不含任何证书")
+    """判据是"gRPC 拿得出可用的 handshaker"，不是"字节里有 PEM 字样"。"""
+    certificates = _load_certificates(material.certificate, "服务端证书")
+    private_key = _load_private_key(material.private_key)
+    # 三份材料是顺序读的，轮换途中必然存在"新私钥已落盘、证书还是旧的"这个窗口：
+    # 两边各自都解析得出来，只有配对检查看得出不对。gRPC 拿到不配对的一对会直接
+    # 拒绝建 handshaker factory（实测 TSI_INVALID_ARGUMENT），继续沿用旧材料。
+    if _public_der(certificates[0].public_key()) != _public_der(private_key.public_key()):
+        raise ConfigurationError(f"{TLS_MATERIAL_INVALID_PEM}: 服务端证书与私钥不是同一对")
+    if material.client_ca is not None:
+        _load_certificates(material.client_ca, "客户端 CA bundle")
 
 
 def _fingerprint_of(material: TlsMaterial) -> _Fingerprint:
@@ -139,7 +200,10 @@ class TlsMaterialLoader:
                 return None
             _validate(material)
         except ConfigurationError as exc:
-            logger.error("{}: TLS 材料已变更但不可用，继续沿用旧材料: {}", TLS_MATERIAL_READ_FAILED, exc)
+            # 不在这里拼失败码：``exc`` 的消息里带的就是抛出点选的那个码（读不出来是
+            # READ_FAILED，解析不过是 INVALID_PEM）。固定拼一个前缀会把两类事故并成
+            # 一类，按码计数的告警分不出该找运维的挂载还是找签发流程。
+            logger.error("TLS 材料已变更但不可用，继续沿用旧材料: {}", exc)
             return None
         # 校验通过才认指纹：坏材料不留痕，下一次回调还会重试而不是当成"已处理"。
         self._fingerprint = fingerprint

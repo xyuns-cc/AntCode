@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from antcode_gateway.tls_material import (
-    TLS_MATERIAL_READ_FAILED,
+    TLS_MATERIAL_INVALID_PEM,
     TLS_MATERIAL_RELOADED,
     TlsMaterialLoader,
     TlsMaterialPaths,
@@ -41,6 +41,11 @@ ONE_SECOND_NS = 1_000_000_000
 @pytest.fixture(scope="module")
 def authorities() -> Authorities:
     return build_authorities()
+
+
+def _half_written(blob: bytes) -> bytes:
+    """砍掉后半段：BEGIN 头留着、END 没了——运维中断的写留下的就是这个形态。"""
+    return blob[: len(blob) // 2]
 
 
 def _loaded(tmp_path: Path, authorities: Authorities) -> tuple[TlsMaterialLoader, TlsMaterialPaths]:
@@ -119,19 +124,21 @@ def test_truncated_replacement_is_not_applied_and_reports_a_structured_code(
 ) -> None:
     """运维半写入的 CA 文件不得顶掉当前材料，且必须留下结构化失败码。
 
-    断言的是错误码常量而不是中文描述——描述会漂移，码不会。
+    断言的是错误码常量而不是中文描述——描述会漂移，码不会。写进去的是**真实**的
+    半写入形态（BEGIN 头完整、body 截断、没有 END），不是截在 BEGIN 标记内部那种
+    连标记判据都能拦住的构造；校验强度本身钉在 ``test_tls_material_validation``。
     """
     loader, paths = _loaded(tmp_path, authorities)
 
     records: list[str] = []
     sink = logger.add(records.append, level="ERROR")
     try:
-        paths.client_ca.write_bytes(b"-----BEGIN CERT")
+        paths.client_ca.write_bytes(_half_written(authorities.replacement.ca))
         assert loader.certificate_configuration() is None
     finally:
         logger.remove(sink)
 
-    assert any(TLS_MATERIAL_READ_FAILED in record for record in records)
+    assert any(TLS_MATERIAL_INVALID_PEM in record for record in records)
 
 
 def test_persistently_broken_material_keeps_reporting_on_every_callback(
@@ -149,13 +156,13 @@ def test_persistently_broken_material_keeps_reporting_on_every_callback(
     records: list[str] = []
     sink = logger.add(records.append, level="ERROR")
     try:
-        paths.client_ca.write_bytes(b"-----BEGIN CERT")
+        paths.client_ca.write_bytes(_half_written(authorities.replacement.ca))
         for _ in range(REPEATED_HANDSHAKES):
             assert loader.certificate_configuration() is None
     finally:
         logger.remove(sink)
 
-    reported = [record for record in records if TLS_MATERIAL_READ_FAILED in record]
+    reported = [record for record in records if TLS_MATERIAL_INVALID_PEM in record]
     assert len(reported) == REPEATED_HANDSHAKES
 
 
