@@ -21,7 +21,18 @@ export function snapshotErrorFor(
   return errors?.find((error) => error.column === column)
 }
 
-/** tooltip 文案带上键名，否则运维只知道"坏了"不知道坏在哪个键。 */
+/**
+ * tooltip 文案带上键名，否则运维只知道"坏了"不知道坏在哪个键。
+ *
+ * 两种坏法的下一步动作不同，措辞必须跟着 reason 走：
+ * - field_mismatch：这一列还是对象，只是键集/取值漂了 → 去补读回 schema；
+ * - not_an_object：这一列压根不是对象（数组、或被二次编码成字符串）→ 去查是谁写的这一列。
+ *   这时没有键名可指，套用"schema 未声明"的说法会把人引去补一个并不存在的字段。
+ */
 export function snapshotErrorTooltip(error: WorkerSnapshotError): string {
-  return `${error.column} 读取失败（控制面 schema 未声明或取值越界）: ${error.message}`
+  const cause =
+    error.reason === 'not_an_object'
+      ? '该列不是 JSON 对象，请检查写入这一列的那条路径'
+      : '控制面 schema 未声明或取值越界'
+  return `${error.column} 读取失败（${cause}）: ${error.message}`
 }

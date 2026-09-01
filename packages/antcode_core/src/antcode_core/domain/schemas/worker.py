@@ -116,10 +116,11 @@ class WorkerResponse(BaseModel):
 
     transportMode: str | None = Field(None, description="连接模式: direct/gateway")
 
-    # None 只有一个含义：这一列有数据但读不回来，原因在 snapshotErrors 里。
-    # 不用默认值填，填了就与一台真正空闲的 Worker 无法区分。
-    capabilities: WorkerCapabilities | None = Field(default_factory=WorkerCapabilities)
-    metrics: WorkerMetrics | None = Field(default_factory=WorkerMetrics)
+    # None = 这一列没有可信读数，绝不用默认值填——填了就与一台真正空闲的 Worker 无法区分。
+    # 到底是哪种"没有"，看 snapshotErrors：带本列的条目 = 有数据但读不回来（原因在条目里）；
+    # 不带 = 这台机器还没上报过。前端按这两种分别渲染"读取失败"与"—"。
+    capabilities: WorkerCapabilities | None = Field(default=None)
+    metrics: WorkerMetrics | None = Field(default=None)
     snapshotErrors: list[WorkerSnapshotError] = Field(default_factory=list, description="读不回来的自报列")
     lastHeartbeat: str = Field("", description="最后心跳时间")
     createdAt: datetime = Field(..., description="创建时间")

@@ -5,10 +5,9 @@
 """
 
 import asyncio
-from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 from loguru import logger
 
@@ -29,12 +28,19 @@ from antcode_core.application.services.workers.worker_capability_routing import 
 from antcode_core.application.services.workers.worker_dispatch_failure import failed_batch_dispatch
 from antcode_core.application.services.workers.worker_liveness import heartbeat_age_ms
 from antcode_core.application.services.workers.worker_load_score import PERCENT_FULL, calculate_load_score
-from antcode_core.application.services.workers.worker_metrics import normalize_worker_metrics
 from antcode_core.application.services.workers.worker_registration_gate import filter_registration_ready_workers
+from antcode_core.application.services.workers.worker_resource_probe import (
+    WorkerMetricsUnavailableError,
+    collect_dispatch_candidates,
+    merge_worker_metrics,
+    probe_failure_suffix,
+    probe_worker_resources,
+    warn_unreadable_workers,
+)
 from antcode_core.application.services.workers.worker_selection import select_dispatch_worker
 from antcode_core.common.error_messages import normalize_persisted_error_message
 from antcode_core.domain.models import Worker, WorkerStatus
-from antcode_core.infrastructure.redis import task_ready_stream, worker_heartbeat_key
+from antcode_core.infrastructure.redis import task_ready_stream
 from antcode_core.observability.tracing import get_current_trace
 
 
@@ -119,40 +125,22 @@ class WorkerLoadBalancer:
         return cached
 
     def _merge_metrics(self, worker_metrics, resource_metrics):
-        merged = {}
-        if worker_metrics:
-            merged.update(worker_metrics)
-        if resource_metrics:
-            merged.update(resource_metrics)
-        return merged
+        return merge_worker_metrics(worker_metrics, resource_metrics)
 
     async def _fetch_resources(self, worker):
         try:
-            metrics = worker.metrics if isinstance(worker.metrics, dict) else {}
-
-            # 如果数据库没有指标，尝试从 Redis 心跳中读取
-            if not metrics:
-                try:
-                    from antcode_core.infrastructure.redis import get_redis_client
-
-                    redis = await get_redis_client()
-                    hb_key = worker_heartbeat_key(worker.public_id)
-                    raw = await cast(Awaitable[dict[Any, Any]], redis.hgetall(hb_key))
-                    metrics = {
-                        (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
-                        for k, v in raw.items()
-                    }
-                except Exception:
-                    metrics = {}
-
-            normalized = normalize_worker_metrics(metrics)
-
-            self._resource_cache[worker.id] = normalized
-            self._resource_cache_time[worker.id] = asyncio.get_event_loop().time()
-            return normalized
+            normalized = await probe_worker_resources(worker)
+        # "读不到指标"必须原样冒出去。被下面这个 except 兜成 None，就又回到了
+        # "Redis 抖一下 = 所有 Worker 一起消失，且没人知道为什么"。
+        except WorkerMetricsUnavailableError:
+            raise
         except Exception as e:
             logger.warning(f"资源指标无效: worker={worker.name}, error={e}")
             return None
+
+        self._resource_cache[worker.id] = normalized
+        self._resource_cache_time[worker.id] = asyncio.get_event_loop().time()
+        return normalized
 
     async def _refresh_resources(self, worker):
         cached = self._get_cached_resources(worker)
@@ -276,28 +264,16 @@ class WorkerLoadBalancer:
             return_exceptions=True,
         )
 
-        candidates = []
-        for worker, resource_metrics in zip(filtered_workers, resource_results, strict=False):
-            if isinstance(resource_metrics, Exception) or not resource_metrics:
-                logger.debug(f"资源信息不可用 [{worker.name}]")
-                continue
+        candidates = collect_dispatch_candidates(self, filtered_workers, resource_results)
+        warn_unreadable_workers(candidates)
 
-            metrics = self._merge_metrics(worker.metrics, resource_metrics)
-            if not self.is_worker_available(worker, metrics):
-                logger.debug(f"节点不可用 [{worker.name}]")
-                continue
-
-            candidates.append((worker, metrics))
-
-        if not candidates:
-            if require_render:
-                logger.warning("无符合条件的渲染节点")
-            else:
-                logger.warning("无符合条件节点")
+        if not candidates.scored:
+            shortage = "无符合条件的渲染节点" if require_render else "无符合条件节点"
+            logger.warning("{}{}", shortage, probe_failure_suffix(candidates))
             return None
 
         scored_workers = []
-        for worker, metrics in candidates:
+        for worker, metrics in candidates.scored:
             score = calculate_load_score(metrics)
             scored_workers.append((worker, score))
             logger.debug(f"负载评分 [{worker.name}] {score}")
