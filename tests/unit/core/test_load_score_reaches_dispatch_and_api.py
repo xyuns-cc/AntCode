@@ -18,12 +18,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from antcode_core.application.services.workers.worker_dispatcher import WorkerLoadBalancer
 from antcode_core.application.services.workers.worker_liveness import HEARTBEAT_AGE_UNKNOWN_MS
+from antcode_core.application.services.workers.worker_load_balancing import WorkerLoadBalancer
 from antcode_core.application.services.workers.worker_load_score import PERCENT_FULL
 from antcode_core.domain.models.enums import WorkerStatus
 
-_READY_FILTER = "antcode_core.application.services.workers.worker_dispatcher.filter_registration_ready_workers"
+_READY_FILTER = "antcode_core.application.services.workers.worker_load_balancing.filter_registration_ready_workers"
 
 _MAX_TASKS = 10
 # 三台都在正常干活的量级：各自吃掉自己配额的两成到七成，全都远低于 90 的硬门禁。

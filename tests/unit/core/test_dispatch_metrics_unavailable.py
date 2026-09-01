@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock
 
 import antcode_core.infrastructure.redis as redis_module
 import pytest
-from antcode_core.application.services.workers.worker_dispatcher import WorkerLoadBalancer
+from antcode_core.application.services.workers.worker_load_balancing import WorkerLoadBalancer
 from antcode_core.application.services.workers.worker_load_score import PERCENT_FULL
 from antcode_core.application.services.workers.worker_resource_probe import (
     WorkerMetricsUnavailableError,

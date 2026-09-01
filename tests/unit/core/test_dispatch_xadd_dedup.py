@@ -9,8 +9,8 @@ from antcode_core.application.services.lease_fenced_ready_publish import (
     LeaseDispatchFenceError,
     scheduler_dispatch_epoch,
 )
-from antcode_core.application.services.workers import worker_dispatcher as dispatcher_module
-from antcode_core.application.services.workers.worker_dispatcher import WorkerTaskDispatcher
+from antcode_core.application.services.workers import worker_ready_stream as ready_stream_module
+from antcode_core.application.services.workers.worker_ready_stream import publish_ready_batch_to_worker
 from antcode_core.infrastructure.redis import stream_client as stream_client_module
 from antcode_core.infrastructure.redis import stream_dedup
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -117,14 +117,14 @@ def _patch_stream(monkeypatch, fake: _FakeStream):
             raise fake._xadd_error
         return ["1-1"]
 
-    monkeypatch.setattr(dispatcher_module.ready_publish, "publish_ready_batch", publish)
+    monkeypatch.setattr(ready_stream_module.ready_publish, "publish_ready_batch", publish)
 
 
 def _snapshot() -> LeaseCapabilitySnapshot:
     return LeaseCapabilitySnapshot("lease-7", '{"task_types":["code"]}', 7)
 
 
-# B12: 派发必须在已验证的 Master 代际内进行，否则 _send_batch_to_queue 直接抛错。
+# B12: 派发必须在已验证的 Master 代际内进行，否则 publish_ready_batch_to_worker 直接抛错。
 DISPATCH_EPOCH = 19
 
 
@@ -132,10 +132,9 @@ DISPATCH_EPOCH = 19
 async def test_send_batch_carries_deterministic_dispatch_id(monkeypatch):
     fake = _FakeStream()
     _patch_stream(monkeypatch, fake)
-    dispatcher = WorkerTaskDispatcher()
 
     with scheduler_dispatch_epoch(DISPATCH_EPOCH):
-        result = await dispatcher._send_batch_to_queue(
+        result = await publish_ready_batch_to_worker(
             worker=_worker(), tasks=[_task("run-42")], batch_id="b1", lease_snapshot=_snapshot()
         )
 
@@ -149,10 +148,9 @@ async def test_lost_response_with_committed_write_is_treated_as_success(monkeypa
     fake = _FakeStream(xadd_error=RedisTimeoutError("response lost"))
     _patch_stream(monkeypatch, fake)
     monkeypatch.setattr(stream_dedup, "find_recent_field_values", AsyncMock(return_value={"run-42"}))
-    dispatcher = WorkerTaskDispatcher()
 
     with scheduler_dispatch_epoch(DISPATCH_EPOCH):
-        result = await dispatcher._send_batch_to_queue(
+        result = await publish_ready_batch_to_worker(
             worker=_worker(), tasks=[_task("run-42")], batch_id="b1", lease_snapshot=_snapshot()
         )
 
@@ -165,10 +163,9 @@ async def test_lost_response_with_confirmed_absence_fails(monkeypatch):
     fake = _FakeStream(xadd_error=RedisTimeoutError("response lost"))
     _patch_stream(monkeypatch, fake)
     monkeypatch.setattr(stream_dedup, "find_recent_field_values", AsyncMock(return_value=set()))
-    dispatcher = WorkerTaskDispatcher()
 
     with scheduler_dispatch_epoch(DISPATCH_EPOCH):
-        result = await dispatcher._send_batch_to_queue(
+        result = await publish_ready_batch_to_worker(
             worker=_worker(), tasks=[_task("run-42")], batch_id="b1", lease_snapshot=_snapshot()
         )
 
@@ -183,7 +180,7 @@ async def test_lease_fence_failure_never_uses_commit_dedup(monkeypatch):
     monkeypatch.setattr(stream_dedup, "find_recent_field_values", find)
 
     with scheduler_dispatch_epoch(DISPATCH_EPOCH), pytest.raises(LeaseDispatchFenceError, match="lease_changed"):
-        await WorkerTaskDispatcher()._send_batch_to_queue(
+        await publish_ready_batch_to_worker(
             worker=_worker(),
             tasks=[_task("run-42")],
             batch_id="b1",

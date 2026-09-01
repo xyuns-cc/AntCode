@@ -11,12 +11,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import antcode_core.application.services.workers.worker_dispatcher as dispatcher_module
+import antcode_core.application.services.workers.worker_load_balancing as balancer_module
 import antcode_core.infrastructure.redis as redis_module
 from antcode_core.domain.models.enums import WorkerStatus
 from loguru import logger
 
-READY_FILTER = "antcode_core.application.services.workers.worker_dispatcher.filter_registration_ready_workers"
+READY_FILTER = "antcode_core.application.services.workers.worker_load_balancing.filter_registration_ready_workers"
 
 MAX_TASKS = 10
 IDLE_CPU = 15
@@ -87,7 +87,7 @@ def install_workers(monkeypatch, workers, *, cpu_by_name=None):
         async def all(self):
             return list(workers)
 
-    monkeypatch.setattr(dispatcher_module, "Worker", SimpleNamespace(filter=lambda **_kwargs: _Query()))
+    monkeypatch.setattr(balancer_module, "Worker", SimpleNamespace(filter=lambda **_kwargs: _Query()))
 
 
 class Records:

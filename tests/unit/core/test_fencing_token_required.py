@@ -6,7 +6,7 @@ Master 代际校验，任何没被 ``scheduler_dispatch_epoch()`` 包裹的派�
 
 环境未安装 lupa/fakeredis，无法执行真 Lua；这里用一个按
 ``_PUBLISH_READY_LUA`` 契约求值的假 Redis 驱动真实的 ``publish_ready_batch``
-与 ``WorkerTaskDispatcher._send_batch_to_queue``，并额外对脚本正文做结构断言，
+与 ``worker_ready_stream.publish_ready_batch_to_worker``，并额外对脚本正文做结构断言，
 防止假 Redis 与真脚本发生分歧。
 """
 
@@ -25,8 +25,8 @@ from antcode_core.application.services.lease_fenced_ready_publish import (
     scheduler_dispatch_epoch,
 )
 from antcode_core.application.services.lease_service import LEASE_RECORD_RETENTION_MS
-from antcode_core.application.services.workers import worker_dispatcher as dispatcher_module
-from antcode_core.application.services.workers.worker_dispatcher import WorkerTaskDispatcher
+from antcode_core.application.services.workers import worker_ready_stream as ready_stream_module
+from antcode_core.application.services.workers.worker_ready_stream import publish_ready_batch_to_worker
 from antcode_core.infrastructure.redis import stream_client as stream_client_module
 from redis.exceptions import ResponseError
 
@@ -235,7 +235,7 @@ def _patch_dispatch_publish(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, A
         return ["1-0"]
 
     published: list[dict[str, Any]] = []
-    monkeypatch.setattr(dispatcher_module.ready_publish, "publish_ready_batch", publish)
+    monkeypatch.setattr(ready_stream_module.ready_publish, "publish_ready_batch", publish)
     return published
 
 
@@ -246,7 +246,7 @@ async def test_dispatch_outside_scheduler_epoch_raises_instead_of_publishing(
     published = _patch_dispatch_publish(monkeypatch)
 
     with pytest.raises(SchedulerDispatchEpochMissingError, match="scheduler_dispatch_epoch"):
-        await WorkerTaskDispatcher()._send_batch_to_queue(
+        await publish_ready_batch_to_worker(
             worker=_worker(),
             tasks=[_task()],
             batch_id="b1",
@@ -263,7 +263,7 @@ async def test_dispatch_inside_scheduler_epoch_forwards_the_master_generation(
     published = _patch_dispatch_publish(monkeypatch)
 
     with scheduler_dispatch_epoch(CURRENT_EPOCH):
-        result = await WorkerTaskDispatcher()._send_batch_to_queue(
+        result = await publish_ready_batch_to_worker(
             worker=_worker(),
             tasks=[_task()],
             batch_id="b1",

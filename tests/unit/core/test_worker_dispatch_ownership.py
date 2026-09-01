@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from antcode_core.application.services.lease_capability_snapshot import LeaseCapabilitySnapshot
 from antcode_core.application.services.workers import dispatch_bind_guard as guard
+from antcode_core.application.services.workers.worker_dispatch_admission import DispatchAdmission
 from antcode_core.application.services.workers.worker_dispatcher import WorkerTaskDispatcher
 from antcode_core.domain.models import WorkerStatus
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
@@ -70,8 +71,10 @@ async def test_dispatch_binds_run_before_publishing(monkeypatch):
     )
     events: list[str] = []
 
-    dispatcher._select_worker = AsyncMock(return_value=worker)
-    dispatcher._ensure_worker_connected = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "antcode_core.application.services.workers.worker_dispatcher.admit_dispatch_worker",
+        AsyncMock(return_value=DispatchAdmission(worker=worker)),
+    )
 
     async def bind_runs(tasks, worker_id, snapshot):
         assert tasks[0]["task_id"] == "run-1"
@@ -85,7 +88,10 @@ async def test_dispatch_binds_run_before_publishing(monkeypatch):
         return {"success": True, "accepted_count": 1, "rejected_count": 0}
 
     monkeypatch.setattr(dispatcher, "_bind_task_runs_to_worker", bind_runs)
-    monkeypatch.setattr(dispatcher, "_send_batch_to_queue", publish)
+    monkeypatch.setattr(
+        "antcode_core.application.services.workers.worker_dispatcher.publish_ready_batch_to_worker",
+        publish,
+    )
     monkeypatch.setattr(
         "antcode_core.application.services.workers.worker_dispatcher.require_worker_current_requirements",
         AsyncMock(return_value=LeaseCapabilitySnapshot("lease-7", '{"task_types":["rule"]}', 7)),

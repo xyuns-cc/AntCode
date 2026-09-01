@@ -7,6 +7,7 @@ from antcode_core.application.services.lease_capability_snapshot import LeaseCap
 from antcode_core.application.services.workers.source_bundle_dispatch_service import (
     SourceBundleDispatchService,
 )
+from antcode_core.application.services.workers.worker_dispatch_admission import DispatchAdmission
 from antcode_core.application.services.workers.worker_dispatcher import WorkerTaskDispatcher
 
 
@@ -248,10 +249,15 @@ async def test_dispatcher_enriches_same_project_tasks_by_run(monkeypatch):
         published.extend(tasks)
         return {"success": True, "accepted_count": 3, "rejected_count": 0}
 
-    dispatcher._select_worker = AsyncMock(return_value=worker)
-    dispatcher._ensure_worker_connected = AsyncMock(return_value=True)
     dispatcher._bind_task_runs_to_worker = AsyncMock(return_value=2)
-    dispatcher._send_batch_to_queue = publish
+    monkeypatch.setattr(
+        "antcode_core.application.services.workers.worker_dispatcher.admit_dispatch_worker",
+        AsyncMock(return_value=DispatchAdmission(worker=worker)),
+    )
+    monkeypatch.setattr(
+        "antcode_core.application.services.workers.worker_dispatcher.publish_ready_batch_to_worker",
+        publish,
+    )
     monkeypatch.setattr(
         "antcode_core.application.services.workers.worker_dispatcher.require_worker_current_requirements",
         AsyncMock(return_value=LeaseCapabilitySnapshot("lease-7", '{"task_types":["code","rule"]}', 7)),

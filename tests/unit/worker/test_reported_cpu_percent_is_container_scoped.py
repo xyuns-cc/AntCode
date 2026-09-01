@@ -26,7 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from antcode_core.application.services.workers.worker_dispatcher import WorkerLoadBalancer
+from antcode_core.application.services.workers.worker_load_balancing import WorkerLoadBalancer
 from antcode_core.application.services.workers.worker_metrics import normalize_worker_metrics
 from antcode_core.domain.models import WorkerStatus
 from antcode_worker import cpu_usage, resource_budget

@@ -3,7 +3,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from antcode_core.application.services.workers import worker_selection
-from antcode_core.application.services.workers.worker_dispatcher import WorkerLoadBalancer, WorkerTaskDispatcher
+from antcode_core.application.services.workers.worker_dispatch_admission import admit_dispatch_worker
+from antcode_core.application.services.workers.worker_dispatcher import WorkerTaskDispatcher
+from antcode_core.application.services.workers.worker_load_balancing import WorkerLoadBalancer
 from antcode_core.domain.models.enums import WorkerStatus
 from antcode_core.domain.models.worker import Worker
 
@@ -23,12 +25,13 @@ async def test_explicit_worker_must_match_required_region(monkeypatch) -> None:
     monkeypatch.setattr(worker_selection, "resolve_capability_map", capability_lookup)
     monkeypatch.setattr(worker_selection, "has_unacknowledged_v2_registration", AsyncMock(return_value=False))
 
-    selected = await WorkerTaskDispatcher()._select_worker(
+    admission = await admit_dispatch_worker(
+        WorkerTaskDispatcher().load_balancer,
         worker_id="worker-7",
         region="cn-east",
     )
 
-    assert selected is None
+    assert admission.worker is None
     capability_lookup.assert_not_awaited()
 
 
@@ -48,9 +51,9 @@ async def test_explicit_worker_rejects_unacknowledged_v2_registration(monkeypatc
     monkeypatch.setattr(worker_selection, "has_unacknowledged_v2_registration", pending)
     monkeypatch.setattr(worker_selection, "resolve_capability_map", capability_lookup)
 
-    selected = await WorkerTaskDispatcher()._select_worker(worker_id="worker-7")
+    admission = await admit_dispatch_worker(WorkerTaskDispatcher().load_balancer, worker_id="worker-7")
 
-    assert selected is None
+    assert admission.worker is None
     pending.assert_awaited_once_with("worker-7")
     capability_lookup.assert_not_awaited()
 
@@ -84,7 +87,7 @@ async def test_acl_candidate_list_is_filtered_by_region(monkeypatch) -> None:
     monkeypatch.setattr(balancer, "_refresh_resources", AsyncMock(return_value=metrics))
     ready_filter = AsyncMock(return_value=[west, east])
     monkeypatch.setattr(
-        "antcode_core.application.services.workers.worker_dispatcher.filter_registration_ready_workers",
+        "antcode_core.application.services.workers.worker_load_balancing.filter_registration_ready_workers",
         ready_filter,
     )
 
@@ -103,7 +106,7 @@ async def test_auto_selection_filters_unacknowledged_v2_registration(monkeypatch
     balancer = WorkerLoadBalancer()
     ready_filter = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "antcode_core.application.services.workers.worker_dispatcher.filter_registration_ready_workers",
+        "antcode_core.application.services.workers.worker_load_balancing.filter_registration_ready_workers",
         ready_filter,
     )
     refresh = AsyncMock()

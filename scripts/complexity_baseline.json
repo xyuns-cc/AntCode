@@ -561,48 +561,6 @@
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 770
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerLoadBalancer.select_best_worker",
-      "rule": "C901",
-      "value": 15
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerLoadBalancer.select_best_worker",
-      "rule": "PLR0912",
-      "value": 15
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerLoadBalancer.select_best_worker",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerTaskDispatcher._select_worker",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerTaskDispatcher.dispatch_batch",
-      "rule": "C901",
-      "value": 15
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerTaskDispatcher.dispatch_batch",
-      "rule": "PLR0912",
-      "value": 14
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
       "function": "WorkerTaskDispatcher.dispatch_batch",
       "rule": "POSITIONAL_ARGS",
       "value": 6
@@ -612,18 +570,6 @@
       "function": "WorkerTaskDispatcher.dispatch_task",
       "rule": "POSITIONAL_ARGS",
       "value": 12
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerTaskDispatcher.get_task_logs_from_worker",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_dispatcher.py",
-      "function": "WorkerTaskDispatcher.get_task_status_from_worker",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/workers/worker_heartbeat_service.py",

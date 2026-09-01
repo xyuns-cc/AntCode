@@ -13,14 +13,16 @@ from antcode_core.application.services.workers.worker_connection_service import 
     worker_connection_service,
 )
 from antcode_core.application.services.workers.worker_dispatcher import (
-    WorkerLoadBalancer,
     WorkerTaskDispatcher,
-    worker_load_balancer,
     worker_task_dispatcher,
 )
 from antcode_core.application.services.workers.worker_heartbeat_service import (
     WorkerHeartbeatService,
     worker_heartbeat_service,
+)
+from antcode_core.application.services.workers.worker_load_balancing import (
+    WorkerLoadBalancer,
+    worker_load_balancer,
 )
 from antcode_core.application.services.workers.worker_service import WorkerService, worker_service
 from antcode_core.application.services.workers.worker_stats_service import (

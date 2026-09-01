@@ -217,7 +217,7 @@ return 'requeued'
     ) -> str:
         """拒绝任务并回写 ready stream；超过 ``MAX_REQUEUE_COUNT`` 次进死信。
 
-        注：保留 JSON 帧以兼容 Master 当前的 ``_send_batch_to_queue`` 写入端。
+        注：保留 JSON 帧以兼容 Master 当前的 ``worker_ready_stream.publish_ready_batch_to_worker`` 写入端。
         待 Master 切换为 ``ProtoCodec(TaskDispatch)`` 派发后，这里需要改为
         ``xadd {PROTO_FIELD: TaskDispatch.SerializeToString()}``。
         """

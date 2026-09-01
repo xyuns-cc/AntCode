@@ -6,7 +6,7 @@
 压力也不是宿主的压力，而是两层混出来的第三个数。所以本模块的入口直接吃
 ``CpuBudget``，由它的 ``source`` 决定占用从哪一层读——**来源不可能分叉**。
 
-这个混用不是显示瑕疵，它是调度判据：``worker_dispatcher.is_worker_available`` 拿
+这个混用不是显示瑕疵，它是调度判据：``worker_load_balancing.is_worker_available`` 拿
 CPU 百分比当硬门禁（阈值 90），``worker_load_score.calculate_load_score`` 又给它三分
 之一的权重（三项判据之一，与内存占用、并发槽位占用同权）。
 真机实测（192.168.1.250）两个方向都会判错：

@@ -101,7 +101,7 @@ def test_unwritten_success_rate_cannot_change_the_score() -> None:
 
 
 def test_heartbeat_age_cannot_change_the_score() -> None:
-    """心跳年龄是新鲜度，已由 ``_ensure_worker_connected`` 与 ONLINE/OFFLINE 判活把关。
+    """心跳年龄是新鲜度，已由 ``worker_heartbeat_is_fresh`` 与 ONLINE/OFFLINE 判活把关。
 
     再作为软判据计一次是重复计分；而它恒饱和，等于只给所有人加同一个常数。
     """

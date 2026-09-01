@@ -26,12 +26,12 @@ async def get_distributed_task_status(
     require_worker_access,
     require_run_access,
 ):
-    from antcode_core.application.services.workers import worker_task_dispatcher
+    from antcode_core.application.services.workers.worker_run_readback import get_run_status
 
-    worker = await require_worker_access(worker_id, current_user)
+    await require_worker_access(worker_id, current_user)
     await require_run_access(task_id, current_user)
 
-    status_data = await worker_task_dispatcher.get_task_status_from_worker(worker, task_id)
+    status_data = await get_run_status(task_id)
     if not status_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在或无法获取状态")
     return success(status_data)
@@ -47,12 +47,12 @@ async def get_distributed_task_logs(
     require_worker_access,
     require_run_access,
 ):
-    from antcode_core.application.services.workers import worker_task_dispatcher
+    from antcode_core.application.services.workers.worker_run_readback import get_run_logs
 
-    worker = await require_worker_access(worker_id, current_user)
+    await require_worker_access(worker_id, current_user)
     await require_run_access(task_id, current_user)
 
-    logs = await worker_task_dispatcher.get_task_logs_from_worker(worker, task_id, log_type, tail)
+    logs = await get_run_logs(task_id, log_type=log_type, tail=tail)
     return success({"logs": logs, "total": len(logs), "worker_id": worker_id, "task_id": task_id})
 
 
