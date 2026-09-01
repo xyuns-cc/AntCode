@@ -1055,7 +1055,7 @@
       "path": "services/master/src/antcode_master/ingester/result_loop.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 505
+      "value": 497
     },
     {
       "path": "services/master/src/antcode_master/ingester/result_loop.py",
