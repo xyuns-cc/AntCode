@@ -153,7 +153,6 @@ services:
       GRPC_TLS_KEY_PATH: /etc/antcode/tls/server.key
       GRPC_TLS_CA_PATH: /etc/antcode/tls/ca.crt
       ANTCODE_GATEWAY_ALLOW_INSECURE: "false"
-      ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS: "1"
     secrets:
       - database_url
       - redis_url

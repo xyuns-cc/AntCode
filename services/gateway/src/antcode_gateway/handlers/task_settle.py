@@ -12,11 +12,6 @@ from datetime import datetime
 from antcode_core.infrastructure.redis import trim_acknowledged_stream
 from loguru import logger
 
-# P1-GW-03 / P0-03a: legacy 边界判定拆到独立子模块,主文件保持在 300 行内。
-from antcode_gateway.handlers._settle_legacy_boundary import (
-    legacy_settle_argv as _legacy_settle_argv,
-)
-
 
 class TaskSettlementMixin:
     """任务结算混入：代际 consumer 校验 + 幂等 ACK/requeue/DLQ。"""
@@ -44,21 +39,17 @@ class TaskSettlementMixin:
     # P1-GW-01: ACK 也收敛为 Lua —— XPENDING 的 consumer 归属校验与 XACK
     # 原子完成。持有 entry 的 consumer 是"当前代际"（XAUTOCLAIM 转移后
     # 变更），旧代际的 ACK 在这里被原子拒绝，无法删除新代际在途的消息。
-    # legacy consumer（升级前的裸 worker_id）仅在滚动升级窗口内放行，
-    # 仍限定同一 worker。
     _ACK_SETTLE_LUA = """
 local queue = KEYS[1]
 local group = ARGV[1]
 local msg_id = ARGV[2]
 local expected = ARGV[3]
-local legacy = ARGV[4]
 
 local pending = redis.call('XPENDING', queue, group, msg_id, msg_id, 1)
 if #pending == 0 then
     return 'already_settled'
 end
-local holder = pending[1][2]
-if holder ~= expected and holder ~= legacy then
+if pending[1][2] ~= expected then
     return 'not_owner'
 end
 redis.call('XACK', queue, group, msg_id)
@@ -74,7 +65,6 @@ return 'acked'
             return "error"
 
         consumer = self.generation_consumer(worker_id, lease_id)
-        legacy_arg = _legacy_settle_argv(worker_id)
         try:
             result = await redis.eval(
                 self._ACK_SETTLE_LUA,
@@ -83,7 +73,6 @@ return 'acked'
                 self.WORKER_GROUP,
                 message_id,
                 consumer,
-                legacy_arg,
             )
         except Exception as exc:
             logger.exception(f"确认任务失败: {exc}")
@@ -139,8 +128,8 @@ return 'acked'
     # XRANGE + XADD + XACK 原子完成。此前 XADD 成功、XACK 失败（或响应
     # 丢失后重试）会重复注入同一任务；现在重试命中 already_settled，
     # 不再产生重复消息。
-    # P1-GW-01: 增加 consumer 代际归属校验（ARGV[7]/ARGV[8]），旧代际
-    # 无法 requeue/DLQ 新代际在途的消息。
+    # P1-GW-01: 增加 consumer 代际归属校验（ARGV[7]），旧代际无法
+    # requeue/DLQ 新代际在途的消息。
     _REQUEUE_SETTLE_LUA = """
 local queue = KEYS[1]
 local dlq = KEYS[2]
@@ -151,13 +140,12 @@ local now_iso = ARGV[4]
 local max_requeue = tonumber(ARGV[5])
 local dlq_maxlen = tonumber(ARGV[6])
 local expected = ARGV[7]
-local legacy = ARGV[8]
 
 local pending = redis.call('XPENDING', queue, group, msg_id, msg_id, 1)
 if #pending == 0 then
     return 'already_settled'
 end
-if pending[1][2] ~= expected and pending[1][2] ~= legacy then
+if pending[1][2] ~= expected then
     return 'not_owner'
 end
 local msgs = redis.call('XRANGE', queue, msg_id, msg_id)
@@ -238,7 +226,6 @@ return 'requeued'
             return "error"
 
         consumer = self.generation_consumer(worker_id, lease_id)
-        legacy_arg = _legacy_settle_argv(worker_id)
         try:
             result = await redis.eval(
                 self._REQUEUE_SETTLE_LUA,
@@ -252,7 +239,6 @@ return 'requeued'
                 str(self.MAX_REQUEUE_COUNT),
                 str(self.DEAD_LETTER_MAXLEN),
                 consumer,
-                legacy_arg,
             )
         except Exception as exc:
             logger.exception(f"重新入队失败: {exc}")

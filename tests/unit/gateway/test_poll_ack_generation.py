@@ -16,11 +16,11 @@ class _AckSettleRedis:
         keys = rest[:numkeys]
         argv = rest[numkeys:]
         assert numkeys == 1
-        _group, msg_id, expected, legacy = argv[0], argv[1], argv[2], argv[3]
+        _group, msg_id, expected = argv
         holder = self.pel.get(msg_id)
         if holder is None:
             return b"already_settled"
-        if holder not in (expected, legacy):
+        if holder != expected:
             return b"not_owner"
         del self.pel[msg_id]
         self.acked.append(msg_id)
@@ -82,10 +82,12 @@ async def test_ack_task_rejects_stale_generation_consumer():
 
 
 @pytest.mark.asyncio
-async def test_ack_task_accepts_legacy_bare_worker_consumer(monkeypatch):
-    # P1-GW-06 (round6):default fail-closed 后需显式设 env=0 打开 legacy 通道
-    monkeypatch.setenv("ANTCODE_GATEWAY_LEGACY_SETTLE_UNTIL_TS", "0")
-    # 滚动升级兼容：旧布局的裸 worker_id consumer 仍限定同一 worker 结算。
+async def test_ack_task_rejects_bare_worker_consumer():
+    """裸 worker_id（无代际）不再是可结算的 consumer 名。
+
+    它只在滚动升级窗口内有意义；停机窗口上线后 PEL 里不可能出现这种 entry，
+    再放行等于给旧代际留一条绕开代际 fence 的路。
+    """
     redis = _AckSettleRedis(pel={"1-0": "worker-1"})
     handler = TaskPollHandler(redis_client=redis)
 
@@ -96,4 +98,5 @@ async def test_ack_task_accepts_legacy_bare_worker_consumer(monkeypatch):
         lease_id="lease-1",
     )
 
-    assert outcome == "acked"
+    assert outcome == TaskPollHandler.ACK_OUTCOME_NOT_OWNER
+    assert redis.acked == []
