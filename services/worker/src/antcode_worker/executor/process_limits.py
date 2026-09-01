@@ -47,8 +47,10 @@ _BYTES_PER_MIB = 1024 * 1024
 # - ``write()`` 写进 tmpfs 的页**没有任何进程映射它，因此不进任何进程的 RSS**，
 #   进程树监控对这条路径完全失明。同一画像下 dd 往沙箱 /tmp 写 3000MB（2.09×限额）：
 #   任务树 RSS 全程 ≤6.1MB、exit 0 上报 SUCCESS，而容器 memory.current 冲到 2816MB。
-#   真正约束它的是沙箱 tmpfs 的 ``--size``（见 ``sandbox_mounts``，按本任务的内存
-#   限额定尺寸）与容器级 mem_limit——与 RSS 监控无关。
+#   约束它的只有挂载本身与容器级 mem_limit，与 RSS 监控无关：/tmp 与 /dev/shm 由
+#   ``--size`` 按本任务的内存限额定尺寸；沙箱另外两个 tmpfs（newroot 自身与 ``--dev``
+#   建的 /dev）拿不到 ``--size``，改由 ``--remount-ro`` 封成只读。见
+#   ``sandbox_scratch``——四个挂载点缺一个，缺的那个就是宿主内存一半那么大的可写盘。
 #
 # 容器内 /sys/fs/cgroup 是只读挂载且 cgroup.subtree_control 为空，
 # 在现有安全画像（cap_drop ALL / no-new-privileges / 非 root）下无法为每个任务

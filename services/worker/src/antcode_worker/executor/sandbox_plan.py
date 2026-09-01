@@ -13,8 +13,8 @@ from antcode_worker.executor.exec_path import authoritative_path
 from antcode_worker.executor.process_limits import effective_memory_limit_mb
 from antcode_worker.executor.python_path import authoritative_python_path
 from antcode_worker.executor.sandbox_cancellation import payload_process_limit
-from antcode_worker.executor.sandbox_mounts import private_home
 from antcode_worker.executor.sandbox_provider import SandboxProvider
+from antcode_worker.executor.sandbox_scratch import private_home
 
 _PAYLOAD_PROCESS_LIMIT_KEY = "payload_max_processes"
 _TMPFS_SIZE_KEY = "tmpfs_size_mb"

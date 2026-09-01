@@ -13,13 +13,19 @@ from dataclasses import dataclass
 
 import psutil
 
+from antcode_worker.executor.sandbox_scratch import SANDBOX_TMPFS_MOUNTS
+
 _BYTES_PER_MIB = 1024 * 1024
 
-# 沙箱里的两个内存盘。它们的页计入容器 memory cgroup，却**不进任何进程的 RSS**
-# （write() 写下去的页没有被映射），所以下面的 RSS 求和永远看不见它们。这里单独
-# 采一份，只为在任务因写满而失败时能说清"撞的是哪条限额"——拦截由 tmpfs 的
-# --size 负责，见 sandbox_mounts。
-_SCRATCH_MOUNTS = ("/tmp", "/dev/shm")
+# 沙箱自建的全部内存盘。它们的页计入容器 memory cgroup，却**不进任何进程的 RSS**
+# （write() 写下去的页没有被映射），所以下面的 RSS 求和永远看不见它们。这里单独采
+# 一份，为的是在任务撞上限额时能说清"撞的是哪一个挂载点"。
+#
+# 清单直接取 sandbox_scratch 那一份，不在这里重抄：拦截侧（/tmp、/dev/shm 由 --size
+# 限，/ 与 /dev 由 --remount-ro 封）与归因侧一旦分叉，就会出现"限住了却看不见"——
+# / 与 /dev 之前正是这样漏掉的，它们不在采样范围里，写进去连归因都没有。封读写之后
+# 这两项应当恒为 0；读到非 0 就说明封读写回退了。
+_SCRATCH_MOUNTS = SANDBOX_TMPFS_MOUNTS
 
 
 @dataclass(frozen=True)
@@ -119,7 +125,8 @@ def _read_scratch_mount(path: str, own_devices: frozenset[int]) -> _ScratchSampl
     """读不到就返回 None：进程随时会消失，未启用沙箱时也压根没有独立的内存盘。
 
     这与 ``_sample_member`` 的 AccessDenied 上抛不是一回事——RSS 采少了会让超限判定
-    失效，而这里采不到只是少一条**归因**信息，拦截仍由 tmpfs --size 兑现。
+    失效，而这里采不到只是少一条**归因**信息，拦截由挂载本身兑现（/tmp 与 /dev/shm 的
+    ``--size``、/ 与 /dev 的 ``--remount-ro``，见 sandbox_scratch）。
     """
     try:
         device = os.stat(path).st_dev

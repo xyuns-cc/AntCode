@@ -20,6 +20,7 @@ from antcode_worker.executor.rule_network_policy import (
 from antcode_worker.executor.rule_policy import RULE_PLUGIN_ENV_VARS
 from antcode_worker.executor.sandbox_config import SandboxConfig
 from antcode_worker.executor.sandbox_mounts import SandboxFilesystemRequest, sandbox_filesystem_args
+from antcode_worker.executor.sandbox_scratch import sealed_mount_args
 
 _PRLIMIT_EXECUTABLE = "prlimit"
 _PAYLOAD_PROCESS_LIMIT_KEY = "payload_max_processes"
@@ -100,12 +101,13 @@ class BasicSandbox(SandboxProvider):
         context["work_dir"] = temp_work_dir
 
     def wrap_command(self, cmd: list[str], context: dict[str, Any]) -> list[str]:
+        # 全部挂载参数先收成一个值再交给 sealed_mount_args：封读写必须排在最后一个挂载
+        # 动作之后，写成 extend 序列就会留下"把新挂载加在封读写之后"的写法，而那种 argv
+        # bwrap 直接失败（往只读 newroot 上建挂载点）。
         self._require_bwrap()
         work_dir = self._resolve_work_dir(context)
-        wrapped = self._namespace_args(context)
-        wrapped.extend(self._filesystem_args(cmd, context, work_dir))
-        wrapped.extend(bridge_mount_args(context))
-        wrapped.extend(["--chdir", str(work_dir), "--"])
+        mounts = (*self._filesystem_args(cmd, context, work_dir), *bridge_mount_args(context))
+        wrapped = [*self._namespace_args(context), *sealed_mount_args(mounts), "--chdir", str(work_dir), "--"]
         payload = wrap_rule_command(cmd, context)
         return [*wrapped, *self._limit_payload_processes(payload, context)]
 

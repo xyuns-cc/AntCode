@@ -9,6 +9,7 @@ from pathlib import Path
 
 from antcode_worker.executor.sandbox_executables import executable_mount_roots
 from antcode_worker.executor.sandbox_scope import validate_bundle_root_scope, validate_workspace_scope
+from antcode_worker.executor.sandbox_scratch import private_namespace_args
 
 _SYSTEM_ROOTS = (Path("/usr"), Path("/bin"), Path("/sbin"), Path("/lib"), Path("/lib64"))
 _SAFE_ETC_DIRS = (Path("/etc/ssl/certs"), Path("/etc/ca-certificates"), Path("/etc/fonts"))
@@ -27,11 +28,7 @@ _BROWSER_ROOT = Path("/opt/ms-playwright")
 _BROWSER_PLUGINS = frozenset({"render", "rule", "spider"})
 _TRUSTED_INTERNAL_PACKAGES = ("antcode_worker", "antcode_scrapy", "antcode_core", "antcode_contracts")
 _INTERNAL_PACKAGE_PLUGINS = frozenset({"render", "rule", "spider"})
-_PRIVATE_HOME = "/tmp/antcode-home"
-_PRIVATE_SHARED_MEMORY = "/dev/shm"
-_PRIVATE_SHARED_MEMORY_MODE = "1777"
 _FORBIDDEN_RUNTIME_ROOTS = frozenset({Path("/").resolve(), Path("/tmp").resolve()})
-_BYTES_PER_MIB = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -49,7 +46,7 @@ class SandboxFilesystemRequest:
     # source bundle 解包根目录；include_paths 共享目录是 work_dir 的兄弟节点，
     # 只 bind work_dir 会让它们在沙箱里彻底不存在。
     bundle_root: Path | None = None
-    # 每个内存盘挂载点（/tmp、/dev/shm）的字节上限，单位 MB。见 _private_namespace_args。
+    # 每个内存盘挂载点（/tmp、/dev/shm）的字节上限，单位 MB。见 sandbox_scratch。
     # 无默认值：默认值只能是"不下 --size"，而那正是内核按宿主内存的一半建盘的入口。
     tmpfs_size_mb: int = field(kw_only=True)
 
@@ -76,7 +73,7 @@ def sandbox_filesystem_args(request: SandboxFilesystemRequest) -> tuple[str, ...
     executable = _resolve_executable(request.payload_executable)
     runtime_executable = _optional_executable(request.runtime_executable)
 
-    args = _private_namespace_args(request.tmpfs_size_mb)
+    args = private_namespace_args(request.tmpfs_size_mb)
     mounted: set[tuple[Path, Path]] = set()
     for path in _required_system_roots():
         _append_read_only(args, path, mounted=mounted)
@@ -113,69 +110,6 @@ def _optional_bundle_root(
     bundle_root = _required_directory(request.bundle_root, label="source bundle 根目录")
     validate_bundle_root_scope(bundle_root, work_dir=work_dir, data_root=data_root, run_id=request.run_id)
     return bundle_root
-
-
-def _private_namespace_args(tmpfs_size_mb: int) -> list[str]:
-    """私有 /dev、/proc 与两个内存盘（/dev/shm、/tmp）。
-
-    两个 tmpfs 必须显式定尺寸。不给 ``--size`` 时内核按**宿主内存的一半**建 tmpfs：
-    真机实测（宿主 32GB）任务里 ``statvfs`` 两处各报 16046MB，而整个 Worker 容器的
-    ``memory.max`` 只有 8192MB——单个任务的一个内存盘就是容器额度的 2 倍。这是典型的
-    "值从宿主算出来"：尺寸的来源与它要约束的对象不在同一个坐标系。
-
-    tmpfs 页计入容器 memory cgroup 却不进任何进程的 RSS（``write()`` 写下去的页没有
-    映射），所以进程树 RSS 监控看不见它们，``--size`` 是这条路径**唯一**的每任务边界。
-
-    尺寸取本任务自己的内存限额（``effective_memory_limit_mb``）——不是新发明的比例，
-    就是同一个已经用来收 RLIMIT_DATA 与 RSS 的数：任务对容器内存的占用，无论走哪条
-    通道，都不该超过它自己那一份。
-
-    重复计账（必须知情）：任务池已被 RSS 100% 分光（``task_memory_limit_mb`` =
-    任务池 / 并发），所以任何非零的 tmpfs 预算按定义都是超配。最坏情况单任务
-    = RSS + /tmp + /dev/shm = **3.5 倍**限额，容器级 mem_limit 是硬顶。是 3.5 不是 3：
-    RSS 那一份的上界不是 1 倍而是 ~1.5 倍——它由轮询监控兑现，而
-    ``monitor_interval._OVERSHOOT_BUDGET_RATIO`` 显式允许 50% 超支，按 1 倍算就是把那条
-    已写明的超支预算漏掉了。取这个代价是因为另一条路（把限额砍到 1/3 给 tmpfs 腾地方）
-    会让每个任务的可用内存三等分，代价远大于收益。改动前后的单任务最坏值
-    （限额 1433MB、宿主 32GB）：2×16046 + 1.5×1433 = 34242MB → 3.5 × 限额。
-    """
-    return [
-        "--dev",
-        "/dev",
-        "--dir",
-        _PRIVATE_SHARED_MEMORY,
-        *_tmpfs_size_args(tmpfs_size_mb),
-        "--tmpfs",
-        _PRIVATE_SHARED_MEMORY,
-        "--chmod",
-        _PRIVATE_SHARED_MEMORY_MODE,
-        _PRIVATE_SHARED_MEMORY,
-        "--proc",
-        "/proc",
-        *_tmpfs_size_args(tmpfs_size_mb),
-        "--tmpfs",
-        "/tmp",
-        "--dir",
-        _PRIVATE_HOME,
-    ]
-
-
-def _tmpfs_size_args(tmpfs_size_mb: int) -> tuple[str, ...]:
-    """``--size`` 只作用于紧随其后的那一个 ``--tmpfs``（bwrap 语义），故每个挂载点各下一次。
-
-    ``<= 0`` 不是"不限制"而是**接线断了**：``init_worker_config`` 恒把 0 换成自适应或
-    默认限额（下界 256MB），``engine/config_update`` 走同一条区间校验，运行期没有合法
-    路径能送来 0。旧实现"0 就不下 --size"，于是断掉的接线会安静退回**宿主内存的一半**
-    ——防护不是被关掉，是被换成了本模块正要消灭的那个值。
-    """
-    if tmpfs_size_mb <= 0:
-        raise RuntimeError(
-            f"沙箱内存盘尺寸不可知({tmpfs_size_mb})：0/负数不表示不限制，而是任务级内存限额没接上。"
-            "此时不下 --size 会让内核按宿主内存的一半建 /tmp 与 /dev/shm，单个任务的一个内存盘"
-            "就能超出整个容器的额度。请检查资源限额接线"
-            "(config.init_worker_config → ExecutorConfig.default_memory_limit_mb → effective_memory_limit_mb)。"
-        )
-    return ("--size", str(tmpfs_size_mb * _BYTES_PER_MIB))
 
 
 def _required_system_roots() -> tuple[Path, ...]:
@@ -291,9 +225,4 @@ def _append_parent_dirs(args: list[str], path: Path) -> None:
         args.extend(("--dir", str(parent)))
 
 
-def private_home() -> str:
-    """Return the writable HOME created inside every sandbox namespace."""
-    return _PRIVATE_HOME
-
-
-__all__ = ["SandboxFilesystemRequest", "private_home", "sandbox_filesystem_args"]
+__all__ = ["SandboxFilesystemRequest", "sandbox_filesystem_args"]

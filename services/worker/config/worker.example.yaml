@@ -44,8 +44,10 @@ task_cpu_time_limit_sec: 0    # CPU 时间限制（0=自动）
 #      PROT_NONE 地址预留不计入，所以这里填的是"真的会写下去的内存"；
 #   2) 进程树 RSS 监控——按真实 RSS 采样，超限直接杀掉整棵进程树。
 # MAP_SHARED 匿名映射只受 (2) 与容器级 mem_limit 约束，不受 (1) 约束。
-# write() 写进沙箱 tmpfs（/tmp、/dev/shm）的页 (1)(2) 都看不见——它们不进任何
-#   进程的 RSS——改由这两个 tmpfs 各自的 --size 硬限，尺寸就取本行这个限额。
+# write() 写进沙箱 tmpfs 的页 (1)(2) 都看不见——它们不进任何进程的 RSS。沙箱一共有
+#   四个 tmpfs：/tmp 与 /dev/shm 由各自的 --size 硬限，尺寸就取本行这个限额；
+#   另外两个（沙箱根目录自身、--dev 建的 /dev）bwrap 没有开关能定尺寸，不封的话
+#   内核按宿主内存的一半建盘，改为 --remount-ro 封成只读，任务写它们直接 EROFS。
 task_memory_limit_mb: 0
 auto_resource_limit: true     # 启用自适应资源限制
 
