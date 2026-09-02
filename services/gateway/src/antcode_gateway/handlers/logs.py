@@ -21,7 +21,6 @@ from antcode_contracts import data_pb2
 from antcode_core.application.services.workers.log_batch_validation import validate_log_batch
 from antcode_core.application.services.workers.log_ingest_fence import append_fenced_log_batch
 from antcode_core.common.log_limits import LogBatchLimits
-from antcode_core.infrastructure.redis.control_plane import log_ingest_stream_key
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from loguru import logger
 
@@ -68,15 +67,6 @@ class LogHandler:
         )
         # ProtoCodec 仅用于 xadd_typed/xreadgroup_typed；下面 pipeline 路径绕过它
         self._stream = stream or StreamClient(codec=ProtoCodec(data_pb2.LogBatch))
-
-    def _stream_key(self, run_id: str | None = None) -> str:
-        """全局 ingest stream key（与 Master ingest loop 默认订阅对齐）。
-
-        ``run_id`` 参数保留只是为了兼容老调用点签名；所有 ``xadd`` 都打到
-        单一 ingest stream，Master 解码 LogBatch 后按 ``entry.run_id`` 路由。
-        旧 per-run stream 已废弃。
-        """
-        return log_ingest_stream_key()
 
     async def _get_redis_client(self):
         if self._redis_client is None:
