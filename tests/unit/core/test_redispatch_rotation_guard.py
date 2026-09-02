@@ -14,8 +14,8 @@ from antcode_core.application.services.security.redispatch_rotation_guard import
     require_redispatch_drained,
 )
 
-#: 三个非空键的条目总数（zset 2 + hash 1 + 旧命名空间 zset 3）。
-EXPECTED_NON_EMPTY_REDISPATCH_ENTRIES = 6
+#: pending zset 2 + processing hash 1。
+EXPECTED_NON_EMPTY_REDISPATCH_ENTRIES = 3
 
 
 class _Redis:
@@ -30,14 +30,16 @@ class _Redis:
 
 
 @pytest.mark.asyncio
-async def test_redispatch_guard_checks_current_and_legacy_keys() -> None:
-    """带 hash tag 的新键与不带的旧键都要数进来，漏掉哪一边都会放行未排空的队列。"""
-    namespace = "tenant-a"
-    current = "{tenant-a}:task:redispatch"
-    legacy = "tenant-a:task:redispatch"
+async def test_redispatch_guard_counts_pending_and_processing() -> None:
+    """pending zset 与 processing hash 都要数进来，漏掉哪一边都会放行未排空的队列。
+
+    不带 hash tag 的键不是本产品写得出来的形状（唯一的写入方 ``RedispatchService``
+    三个 key 方法恒带 tag），扫进来只会误伤，因此不扫。
+    """
+    key = "{tenant-a}:task:redispatch"
     state = await inspect_redispatch_drain(
-        _Redis({("zset", current): 2, ("hash", f"{current}:processing"): 1, ("zset", legacy): 3}),
-        namespace,
+        _Redis({("zset", key): 2, ("hash", f"{key}:processing"): 1, ("zset", "tenant-a:task:redispatch"): 3}),
+        "tenant-a",
     )
 
     assert state.total == EXPECTED_NON_EMPTY_REDISPATCH_ENTRIES

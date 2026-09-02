@@ -9,24 +9,17 @@ from dataclasses import dataclass
 class RedispatchDrainState:
     pending: int
     processing: int
-    legacy_pending: int
-    legacy_processing: int
 
     @property
     def total(self) -> int:
-        return self.pending + self.processing + self.legacy_pending + self.legacy_processing
+        return self.pending + self.processing
 
 
 async def inspect_redispatch_drain(redis, namespace: str) -> RedispatchDrainState:
-    """Inspect both current hash-tagged keys and pre-hash-tag legacy keys."""
-    normalized = _validate_namespace(namespace)
-    current = f"{{{normalized}}}:task:redispatch"
-    legacy = f"{normalized}:task:redispatch"
+    key = f"{{{_validate_namespace(namespace)}}}:task:redispatch"
     return RedispatchDrainState(
-        pending=int(await redis.zcard(current)),
-        processing=int(await redis.hlen(f"{current}:processing")),
-        legacy_pending=int(await redis.zcard(legacy)),
-        legacy_processing=int(await redis.hlen(f"{legacy}:processing")),
+        pending=int(await redis.zcard(key)),
+        processing=int(await redis.hlen(f"{key}:processing")),
     )
 
 
@@ -34,8 +27,7 @@ def require_redispatch_drained(state: RedispatchDrainState) -> None:
     if state.total:
         raise RuntimeError(
             "redispatch 队列未排空，禁止轮换或撤销旧 ENCRYPTION_KEY: "
-            f"pending={state.pending}, processing={state.processing}, "
-            f"legacy_pending={state.legacy_pending}, legacy_processing={state.legacy_processing}"
+            f"pending={state.pending}, processing={state.processing}"
         )
 
 

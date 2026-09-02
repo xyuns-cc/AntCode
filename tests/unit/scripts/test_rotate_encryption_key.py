@@ -9,7 +9,7 @@ import pytest
 
 from scripts import rotate_encryption_key as command
 
-REDISPATCH_DRAIN_CHECK_COMMANDS = 4
+REDISPATCH_DRAIN_CHECK_COMMANDS = 2
 
 
 class _Transaction(AbstractAsyncContextManager):
