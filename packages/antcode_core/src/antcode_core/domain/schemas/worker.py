@@ -149,8 +149,8 @@ class WorkerAggregateStats(BaseModel):
     totalTasks: int = Field(0, description="总任务数")
     runningTasks: int = Field(0, description="运行中任务数")
     totalEnvs: int = Field(0, description="总环境数")
-    avgCpu: float = Field(0, description="平均CPU使用率")
-    avgMemory: float = Field(0, description="平均内存使用率")
+    avgCpu: float | None = Field(None, description="平均CPU使用率；null = 没有任何机器上报过指标")
+    avgMemory: float | None = Field(None, description="平均内存使用率；null = 没有任何机器上报过指标")
 
     totalRequests: int = Field(0, description="集群总请求数")
     totalResponses: int = Field(0, description="集群总响应数")

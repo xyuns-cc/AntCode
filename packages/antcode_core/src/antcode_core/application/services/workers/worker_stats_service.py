@@ -65,8 +65,10 @@ class WorkerStatsService:
                     total_latency_weighted += spider_stats.get("avg_latency_ms", 0.0) * resp_count
                     total_rpm += spider_stats.get("requests_per_minute", 0.0)
 
-        avg_cpu = total_cpu / workers_with_metrics if workers_with_metrics > 0 else 0
-        avg_memory = total_memory / workers_with_metrics if workers_with_metrics > 0 else 0
+        # 一台都读不回指标时是"没有数据",不是"整个集群 0% 占用"——后者与集群全空闲
+        # 逐字节相同。上一轮把漂移机器整体退出统计后,全集群漂移就成了一条可达路径。
+        avg_cpu = round(total_cpu / workers_with_metrics, 1) if workers_with_metrics else None
+        avg_memory = round(total_memory / workers_with_metrics, 1) if workers_with_metrics else None
         avg_latency = total_latency_weighted / total_responses if total_responses > 0 else 0.0
 
         return WorkerAggregateStats(
@@ -78,8 +80,8 @@ class WorkerStatsService:
             totalTasks=total_tasks,
             runningTasks=running_tasks,
             totalEnvs=total_envs,
-            avgCpu=round(avg_cpu, 1),
-            avgMemory=round(avg_memory, 1),
+            avgCpu=avg_cpu,
+            avgMemory=avg_memory,
             # 爬虫统计
             totalRequests=total_requests,
             totalResponses=total_responses,

@@ -121,8 +121,9 @@ export interface WorkerAggregateStats {
   totalTasks: number
   runningTasks: number
   totalEnvs: number
-  avgCpu: number
-  avgMemory: number
+  /** null = 没有任何机器上报过指标（不是「平均 0%」），口径见 utils/metricAverage.ts */
+  avgCpu: number | null
+  avgMemory: number | null
   totalRequests: number
   totalResponses: number
   totalItemsScraped: number

@@ -217,3 +217,41 @@ async def test_a_worker_that_never_reported_is_excluded_quietly_and_the_readings
     assert stats.totalTasks == HEALTHY_TASKS
     assert stats.runningTasks == HEALTHY_RUNNING
     assert DRIFT_ALARM not in records.text()
+
+
+# --------------------------------------------------------------------------------------
+# 6. 一台都读不回来时：null 是"没有数据"，0.0 是"整个集群闲着"
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("column", [*DRIFTED_COLUMNS, None])
+@pytest.mark.asyncio
+async def test_a_fully_unreadable_cluster_reports_no_average_instead_of_zero(monkeypatch, column) -> None:
+    """把漂移那台退出统计,就让"全集群都读不回来"成了一条可达路径。
+
+    分母为 0 时旧实现返回 ``0.0``——与下面那条"整个集群闲着"的读数逐字节相同,
+    运维看到的都是"平均 CPU 0%"。机器还在（``totalWorkers`` 非 0）,只是没有一台
+    的指标读得回来,这时唯一诚实的答案是 null。
+    """
+    batch = [worker(1, "mn-a", column), worker(2, "mn-b", column)]
+
+    stats = await _aggregate(monkeypatch, batch)
+
+    assert stats.totalWorkers == WORKERS_IN_BATCH
+    assert stats.avgCpu is None
+    assert stats.avgMemory is None
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_idle_cluster_still_reports_zero(monkeypatch) -> None:
+    """**反判据**：读得回来的 0% 必须还是 0.0,不能被这次改动一起吞成 null。
+
+    没有这条,把 ``avgCpu`` 一律改成 null 也能让上面那条变绿。
+    """
+    idle = {**HEALTHY_COLUMN, "cpu": 0.0, "memory": 0.0}
+    batch = [worker(1, "mn-a", idle), worker(2, "mn-b", idle)]
+
+    stats = await _aggregate(monkeypatch, batch)
+
+    assert stats.avgCpu == 0.0
+    assert stats.avgMemory == 0.0
