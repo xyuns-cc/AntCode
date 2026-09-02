@@ -59,13 +59,13 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 385
+      "value": 344
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",
       "function": "AuditService.get_logs",
       "rule": "POSITIONAL_ARGS",
-      "value": 11
+      "value": 9
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/audit/audit_service.py",

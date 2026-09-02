@@ -216,16 +216,12 @@ class AuditService:
         start_date=None,
         end_date=None,
         success=None,
-        cursor_created_at=None,
-        cursor_id=None,
     ):
-        """查询审计日志（H1: 支持 keyset 分页，向后兼容 offset）。
+        """查询审计日志（offset 分页）。
 
-        - **keyset 模式**（推荐）：传 ``cursor_created_at`` + ``cursor_id``，
-          走 ``(created_at, id) < cursor`` 索引区间扫描，与页深无关；
-          ``total`` 用近似值（``pg_class.reltuples``）避免 count 全表扫。
-        - **offset 模式**（兼容）：不传 cursor 时保留旧 offset 行为，但
-          审计表增长后 offset 深翻页会随行数线性变慢，产品化时切 keyset。
+        分页保持 offset：调用方只有 ``GET /audit/logs``，它由 antd Pagination
+        驱动，需要**精确** ``total`` 才能算页数——keyset 那套近似行数
+        （``pg_class.reltuples``）会直接把页码算错。
         """
         query = AuditLog.all()
 
@@ -244,18 +240,8 @@ class AuditService:
         if success is not None:
             query = query.filter(success=success)
 
-        use_keyset = cursor_created_at is not None and cursor_id is not None
-        if use_keyset:
-            # (created_at, id) < (cursor_created_at, cursor_id) —— 组合条件保证
-            # 同一 created_at 内的稳定排序。
-            query = query.filter(
-                created_at__lt=cursor_created_at,
-            )
-            total = await self._approximate_count()  # 近似值，避免全表扫
-            logs = await query.order_by("-created_at", "-id").limit(page_size).all()
-        else:
-            total = await query.count()
-            logs = await query.order_by("-created_at", "-id").offset((page - 1) * page_size).limit(page_size)
+        total = await query.count()
+        logs = await query.order_by("-created_at", "-id").offset((page - 1) * page_size).limit(page_size)
 
         return {
             "total": total,
@@ -279,34 +265,7 @@ class AuditService:
                 }
                 for log in logs
             ],
-            # H1: keyset 模式下返回下一页 cursor（最后一条的 created_at + id）
-            "next_cursor": (
-                {
-                    "created_at": logs[-1].created_at.isoformat(),
-                    "id": logs[-1].id,
-                }
-                if logs and use_keyset
-                else None
-            ),
         }
-
-    async def _approximate_count(self) -> int:
-        """H1: 用 pg_class.reltuples 拿近似行数，避免 count(*) 全表扫。
-
-        统计信息滞后属可接受（vacuum 后更新）。失败时返回 -1 让前端知道
-        不可用。
-        """
-        try:
-            from tortoise import Tortoise
-
-            conn = Tortoise.get_connection("default")
-            sql = "SELECT reltuples::bigint AS n FROM pg_class WHERE relname = 'audit_logs'"
-            _, rows = await conn.execute_query(sql, [])
-            if rows:
-                return int(rows[0].get("n") or 0)
-        except Exception:
-            pass
-        return -1
 
     async def get_user_activity(self, username, days=30, limit=100):
         """获取用户活动记录"""

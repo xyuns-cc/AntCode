@@ -62,3 +62,16 @@ async def test_get_logs_applies_user_id_and_returns_user_id(monkeypatch):
 
     assert {"user_id": 123} in query.filters
     assert result["items"][0]["user_id"] == 123
+
+
+def test_get_logs_is_offset_only():
+    """审计查询只有 offset 一条路：路由不暴露 cursor，前端 Pagination 也要精确 total。
+
+    历史上还有一条 keyset 分支，它只按 ``created_at__lt`` 过滤而从不带上
+    ``cursor_id``，同一秒的行会被静默跳过；且经 HTTP 根本走不到。
+    """
+    import inspect
+
+    params = inspect.signature(AuditService.get_logs).parameters
+    assert not [name for name in params if "cursor" in name]
+    assert not hasattr(AuditService, "_approximate_count")
