@@ -10,10 +10,7 @@ class RedisKeys:
     DEFAULT_NAMESPACE = "antcode"
 
     # === 任务相关 ===
-    TASK_QUEUE_PREFIX = "task:queue"
     TASK_READY_PREFIX = "task:ready"
-    TASK_DELAY_PREFIX = "task:delay"
-    TASK_RUNNING_PREFIX = "task:running"
     TASK_RESULT_PREFIX = "task:result"
 
     # === 日志相关 ===
@@ -91,26 +88,6 @@ class RedisKeys:
 
     def spider_config_key(self, project_id: str) -> str:
         return self._ns(f"{self.SPIDER_CONFIG_PREFIX}:{project_id}")
-
-    @classmethod
-    def task_queue(cls, priority: int = 0) -> str:
-        """任务队列 Key"""
-        return f"{cls.TASK_QUEUE_PREFIX}:{priority}"
-
-    @classmethod
-    def task_ready(cls, priority: int = 0) -> str:
-        """就绪队列 Key（Redis Stream）"""
-        return f"{cls.TASK_READY_PREFIX}:{priority}"
-
-    @classmethod
-    def task_delay(cls) -> str:
-        """延迟队列 Key（Redis ZSet）"""
-        return cls.TASK_DELAY_PREFIX
-
-    @classmethod
-    def task_running(cls, worker_id: str) -> str:
-        """运行中任务 Key"""
-        return f"{cls.TASK_RUNNING_PREFIX}:{worker_id}"
 
     @classmethod
     def task_result(cls, run_id: str) -> str:
