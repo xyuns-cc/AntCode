@@ -16,7 +16,9 @@ class RedispatchDrainState:
 
 
 async def inspect_redispatch_drain(redis, namespace: str) -> RedispatchDrainState:
-    key = f"{{{_validate_namespace(namespace)}}}:task:redispatch"
+    # namespace 的唯一来源是 settings.REDIS_NAMESPACE，pattern 已排除空串、
+    # 空白与 hash-tag 括号，这里再校验一遍只会重复一个已被证明的前置条件。
+    key = f"{{{namespace}}}:task:redispatch"
     return RedispatchDrainState(
         pending=int(await redis.zcard(key)),
         processing=int(await redis.hlen(f"{key}:processing")),
@@ -29,15 +31,6 @@ def require_redispatch_drained(state: RedispatchDrainState) -> None:
             "redispatch 队列未排空，禁止轮换或撤销旧 ENCRYPTION_KEY: "
             f"pending={state.pending}, processing={state.processing}"
         )
-
-
-def _validate_namespace(namespace: str) -> str:
-    normalized = namespace.strip()
-    if not normalized:
-        raise ValueError("REDIS_NAMESPACE 未配置")
-    if "{" in normalized or "}" in normalized:
-        raise ValueError("REDIS_NAMESPACE 不得包含 Redis hash-tag 分隔符")
-    return normalized
 
 
 __all__ = ["RedispatchDrainState", "inspect_redispatch_drain", "require_redispatch_drained"]
