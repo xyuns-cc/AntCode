@@ -81,27 +81,19 @@ class _LeaseRevokedError(RuntimeError):
     """The current Worker process may never acquire another lease generation."""
 
 
-# P2-#36: 用一个独立 sentinel 对象代替每秒 wait_for(timeout=1.0) 轮询。
-# ``stop()`` 显式把 sentinel 放进 outbox，``_gen()`` 一识别就立刻 return,
-# 客户端流随之关闭。和 ``None`` 区分开以免和合法消息混淆。
 @dataclass
 class GatewayConfig:
-    """Gateway 传输层配置"""
-
-    # 连接配置
     gateway_host: str = "localhost"
     gateway_port: int = 50051
 
-    # TLS 配置
     use_tls: bool = False
     ca_cert_path: str | None = None
     client_cert_path: str | None = None
     client_key_path: str | None = None
     server_name_override: str | None = None
 
-    # gRPC 配置
-    max_send_message_length: int = 50 * 1024 * 1024  # 50MB
-    max_receive_message_length: int = 50 * 1024 * 1024  # 50MB
+    max_send_message_length: int = 50 * 1024 * 1024
+    max_receive_message_length: int = 50 * 1024 * 1024
     log_max_batch_bytes: int = field(
         default_factory=lambda: positive_env_int("GATEWAY_LOG_MAX_BATCH_BYTES", DEFAULT_LOG_MAX_BATCH_BYTES)
     )
@@ -115,39 +107,32 @@ class GatewayConfig:
     keepalive_timeout_ms: int = 10000
     keepalive_permit_without_calls: bool = True
 
-    # 超时配置
     connect_timeout: float = 10.0
     call_timeout: float = 30.0
     artifact_transfer_timeout: float = 300.0
 
-    # 重连配置
     enable_reconnect: bool = True
     initial_backoff: float = 1.0
     max_backoff: float = 60.0
     backoff_multiplier: float = 2.0
     max_reconnect_attempts: int = 0  # 0 = 无限重试
 
-    # 幂等性配置
     enable_receipt_idempotency: bool = True
-    receipt_cache_ttl: float = 300.0  # 5 分钟
+    receipt_cache_ttl: float = 300.0
 
-    # 认证配置
     auth_method: str = "api_key"  # api_key, mtls
     api_key: str | None = None
     worker_id: str | None = None
     task_payload_secret: str = ""
 
-    # Streaming 配置
     task_prefetch: int = 1
     capabilities: list[str] = field(default_factory=list)
 
-    # 队列上限
     task_queue_maxsize: int = 256
     status_queue_maxsize: int = 1024
     log_queue_maxsize: int = 4096
     control_queue_maxsize: int = 256
 
-    # 额外选项
     extra_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -158,7 +143,7 @@ class GatewayConfig:
 
 
 class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
-    """Gateway 传输层实现（P1b：ControlService + DataService 双 stub）"""
+    """Gateway 传输层实现：ControlService + DataService + ArtifactService 三个 stub。"""
 
     def __init__(
         self,
@@ -169,24 +154,18 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         self._gateway_config = gateway_config or GatewayConfig()
         self._lease_capabilities: dict[str, str] = {}
 
-        # gRPC 组件
         self._channel: grpc_aio.Channel | None = None
         self._control_stub: Any = None
         self._data_stub: Any = None
         self._artifact_stub: Any = None
         self._connect_lock = asyncio.Lock()
 
-        # 认证器
         self._authenticator: GatewayAuthenticator | None = None
-
-        # 重连管理器
         self._reconnect_manager: ReconnectManager | None = None
 
-        # 内部队列（streaming RPC 与 transport 接口之间的解耦）
         self._task_inbox: asyncio.Queue[Any] | None = None
         self._control_inbox: asyncio.Queue[Any] | None = None
 
-        # 后台 streaming tasks
         self._task_subscriber: asyncio.Task | None = None
         self._control_subscriber: asyncio.Task | None = None
         self._subscription_health = dict.fromkeys(SUBSCRIPTION_NAMES, False)
@@ -197,30 +176,27 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
                 backoff_multiplier=self._gateway_config.backoff_multiplier,
             )
         )
-        # 幂等性缓存
         self._receipt_cache: dict[str, tuple[float, Any]] = {}
         self._result_cache: dict[str, tuple[float, bool]] = {}
 
-        # 连接状态
         self._connected = False
         self._last_heartbeat: datetime | None = None
         self._consecutive_failures = 0
 
-        # 重连控制
         self._reconnecting = False
         self._auth_failure_count = 0
         self._max_auth_failures = 5
         self._stopping = False
 
-        # Lease 状态（替代 SendHeartbeat）
         self._lease_id: str = ""
         self._lease_revoked = False
         self._lease_revocation_lock = asyncio.Lock()
         self._lease_revocation_started = False
         self._runtime_control_clock = GatewayRuntimeControlClock()
 
-        # P1-GW-02: Lease 被撤销/换代时的对外回调 (由 engine 注册),让 engine
-        # 立即 cancel_all + 唤醒 ownership renew, 而不是等下一个 600s 续租周期。
+        # P1-GW-02: Lease 被撤销/换代时的对外回调（由 engine 注册），让 engine 立即
+        # cancel_all + 唤醒 ownership renew，而不是等下一个 ownership 续租周期
+        # （engine._RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS = 60s）。
         self._lease_revoked_callback: Any | None = None
 
     @property
@@ -305,17 +281,13 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         await self._set_state(WorkerState.OFFLINE)
 
     async def deregister(self, reason: str = "shutdown") -> None:
-        """T7-B3b (P1-6): worker 优雅停机时调 gateway Deregister RPC。
+        """停机时让 master 立即撤销 lease，不等 TTL（30s）到期。
 
-        让 master 立即撤销 lease；不再等 TTL（30s）到期。RPC 失败仅告警不
-        阻塞后续 stop 流程（即使 gateway 不可达 lease 也会自然过期）。
+        RPC 失败仅告警不阻塞 stop（gateway 不可达时 lease 也会自然过期）。
 
-        P2-20: worker_id 只保存在 ``_gateway_config``（``ServerConfig`` 里
-        没有该字段）。旧实现读 ``self._config.worker_id`` 会拿到 AttributeError
-        或 None,导致 Deregister RPC 永远发不出去,worker 停机后仍要等 lease
-        TTL(30s) 到期,期间 master 继续向已下线的 worker 派发任务。这里改成
-        统一从 ``self._gateway_config.worker_id`` 读,与 ``lease_renew`` /
-        ``ack_task`` / ``ack_control`` 等保持一致。
+        P2-20: worker_id 只在 ``_gateway_config`` 上，``ServerConfig`` 没有该字段。
+        读 ``self._config.worker_id`` 会拿到 None，Deregister 永远发不出去，停机后
+        master 还要向已下线 worker 派发满一个 TTL。
         """
         worker_id = self._gateway_config.worker_id or ""
         if not self._control_stub or not worker_id:
@@ -559,7 +531,7 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         if not self._data_stub or not self._running:
             return False
 
-        receipt_id = task_id  # 兼容 TransportBase 调用方语义
+        receipt_id = task_id
         cache_key = f"ack:{receipt_id}"
         if self._gateway_config.enable_receipt_idempotency:
             cached = self._get_cached_result(cache_key)
@@ -589,8 +561,8 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
                 timeout=self._gateway_config.call_timeout,
             )
             success = bool(response.success)
-            # 复审 D2: 只缓存成功结果。缓存 False 会把服务端瞬时失败
-            # （如 Redis 抖动）固化 300s，封死结算重试通道。
+            # 只缓存成功结果：缓存 False 会把服务端瞬时失败（如 Redis 抖动）
+            # 固化 receipt_cache_ttl，封死结算重试通道。
             if success and self._gateway_config.enable_receipt_idempotency:
                 self._cache_result(cache_key, success)
             if success:
@@ -616,29 +588,18 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         return await self.ack_task(receipt, accepted=False, reason=reason)
 
     async def report_result(self, result: TaskResult) -> bool:
-        """报告任务结果：走 ``DataService.StreamStatus`` 单条 client-stream，
-        阻塞等真实 ``StatusAck``。
+        """报告任务结果：每次开一条单元素 ``DataService.StreamStatus``
+        client-stream，阻塞等真实 ``StatusAck``。
 
-        P1-25 修复:
-        --------
-        旧实现走的是 outbox → ``_status_push_loop`` → 长连接 ``StreamStatus``
-        的路径。虽然 B4 用 ``sent_event`` 等 generator ``yield`` 出去，但
-        gRPC ``yield msg`` 完成只代表消息 flush 到本地 HTTP/2 send buffer,
-        **服务端是否落 Redis 未确认** —— server 侧 handler 是 client-stream,
-        只有整条流关闭时才返回 ``StatusAck``, 中间任何一条持久化失败会
-        ``abort(UNAVAILABLE)``, 但那时 ``sent_event`` 已经被 set 了,
+        P1-25: **不能改回长连接 + 等 generator ``yield`` 出去**。``yield msg``
+        返回只代表消息 flush 到本地 HTTP/2 send buffer，服务端是否落 Redis 未确认；
+        server handler 是 client-stream，只在整条流关闭时才回 ``StatusAck``，
+        中间任何一条持久化失败会 ``abort(UNAVAILABLE)``，而那时"已发送"事件早已置位，
         engine 认为上报成功 → XACK 源消息 → 结果丢失。
 
-        修复策略: 每次上报开一条 **单元素 client-stream**, 只 yield 这一条
-        ``TaskStatus``, 然后关闭发送端等 server 回 ``StatusAck``:
-          * ``ack.received >= 1`` → server 已经把这条 TaskStatus 落到
-            ``task:result`` Redis stream (见 gateway data_service.StreamStatus 实现)
-            → 返回 True, engine 可以安全 XACK。
-          * 任何异常 / ``received == 0`` → 返回 False, engine 保留 PEL,
-            下一轮 reclaim 重试。
-        代价: 每个结果上报多一次 stream 建立/关闭的 RTT; 结果上报是低频
-        (每个任务一次), 换来的精确 ack 语义值得。日志侧继续走 outbox
-        长连接, 不受影响。
+        ``ack.received >= 1`` 表示服务端已把这条 TaskStatus 落到 ``task:result``
+        Redis stream，engine 可以安全 XACK。代价是每次上报多一次 stream 建立/关闭
+        的 RTT，结果上报低频（每任务一次），换精确 ack 语义值得。
         """
         if not self._running:
             logger.warning(f"上报结果失败: 传输未运行 task_id={result.task_id}")
@@ -647,15 +608,11 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
             logger.warning(f"上报结果失败: data_stub 未就绪 task_id={result.task_id}")
             return False
 
-        # 幂等性：相同 run + 相同状态 已经上报过就跳过。
-        #
-        # 契约修复: key 必须含 run_id 和 status，不能只用 task_id ——
-        # engine._report_running_start 会先用同一个 task_id 上报一次
-        # status="running"（P1-17 心跳），若 key 只含 task_id，这次 running
-        # 上报会把 ``result:{task_id}`` 缓存为 True（TTL 300s），任务在
-        # 5 分钟内跑完时最终终态上报直接命中缓存被跳过 —— engine 拿到
-        # True 后 XACK + 清状态，master 永远收不到终态，结果凭空丢失。
-        # 含 run_id 同时避免同 task 5 分钟内重跑（不同 run_id）被误吞。
+        # 幂等 key 必须含 run_id 和 status，不能只用 task_id：
+        # engine._report_running_start 先用同一个 task_id 上报过 status="running"，
+        # key 只含 task_id 时这次会把 ``result:{task_id}`` 缓存为 True，任务在
+        # receipt_cache_ttl 内跑完则终态上报命中缓存被跳过 —— engine 拿到 True 后
+        # XACK + 清状态，master 永远收不到终态。run_id 同时挡住同 task 重跑被误吞。
         cache_key = f"result:{result.run_id}:{result.task_id}:{result.status}"
         if self._gateway_config.enable_receipt_idempotency:
             cached = self._get_cached_result(cache_key)
@@ -667,17 +624,13 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
             from antcode_worker.transport.gateway.codecs import TaskStatusEncoder
 
             msg = TaskStatusEncoder.encode(result, self._gateway_config.worker_id or "")
-            # P5.4: 透传当前 trace。``engine._worker_loop`` 在任务起点
-            # set_current_trace,出站时 inject_trace 把 trace 写到
-            # TaskStatus.trace,Master ResultLoop 解码后可以把状态变更
-            # 关联到同一个分布式 trace。
+            # P5.4: 带上 _worker_loop 在任务起点设的 trace，Master ResultLoop 据此
+            # 把状态变更关联到同一个分布式 trace。
             inject_trace(msg)
 
             async def _one_shot():
-                # 单条 client-stream: yield 一次即关闭发送端, 触发 server 回
-                # StatusAck。gRPC AsyncIO 语义: async generator 正常 return
-                # 表示 half-close (client done sending), server 处理完剩余
-                # 请求后返回 unary response。
+                # async generator 正常 return = half-close，server 处理完才回
+                # unary StatusAck；这正是本方法要等的那个确认。
                 yield msg
 
             try:
@@ -701,8 +654,6 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
 
             received = int(getattr(ack, "received", 0) or 0)
             if received < 1:
-                # server 返回了但没确认落库(极少见, 可能是 abort 早于第一次
-                # handle), 视为失败让 engine 重试。
                 logger.warning(
                     f"report_result StatusAck.received={received}, "
                     f"服务端未确认持久化, 视为失败: task_id={result.task_id}"
@@ -875,8 +826,7 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
     # ==================== TransportBase 实现：心跳/Lease ====================
 
     async def send_heartbeat(self, heartbeat: HeartbeatMessage) -> bool:
-        """心跳 — P3 桥接到 ``lease_renew``（触发 ``ControlService.Lease``
-        RPC 并缓存返回的 lease 元数据）；``revoked=True`` 视为心跳失败。"""
+        """心跳桥接到 ``lease_renew``；``revoked=True`` 视为心跳失败。"""
         if not self._running:
             return False
 
@@ -901,7 +851,6 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
             return False
 
     def _heartbeat_to_metrics_dict(self, heartbeat: HeartbeatMessage) -> dict:
-        """``HeartbeatMessage`` → ``LeaseRequest.metrics`` 等价 dict。"""
         return heartbeat_metrics_dict(heartbeat)
 
     async def lease_renew(
@@ -1024,7 +973,6 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         response_field: str,
         ttl_ms: int | None = None,
     ) -> bool:
-        """Run ownership 三个 RPC 的公共实现：构建请求 + 调用 + 取响应布尔位。"""
         from antcode_contracts import artifact_pb2
 
         stub = self._require_artifact_stub()
@@ -1063,8 +1011,8 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
     ) -> bool:
         """构建并发送 ``AckControlRequest``，返回 ``response.received``。
 
-        只封装公共的请求构建 + RPC 调用；异常处理策略由两个调用方自行
-        决定（见 ``ack_control`` / ``send_control_result`` 内注释）。
+        只封装请求构建 + RPC；异常处理策略由两个调用方各自决定，两者的差异是
+        有意的（见 ``ack_control`` / ``send_control_result`` 内注释）。
         """
         from antcode_contracts import control_pb2
         from antcode_core.common.error_messages import normalize_persisted_error_message
@@ -1095,10 +1043,8 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         try:
             return await self._ack_control_rpc(receipt)
         except Exception as e:
-            # 有意保留的行为差异：普通 ACK 吞掉错误只返回 False，不计
-            # _consecutive_failures，也不甄别永久错误——事件留在 PEL 由
-            # Gateway 重投即可；带结果结算的 send_control_result 才需要
-            # 失败计数 + 永久错误上抛。
+            # 有意与 send_control_result 不同：普通 ACK 吞错只返回 False，不计
+            # _consecutive_failures 也不甄别永久错误——事件留在 PEL 等 Gateway 重投。
             logger.exception("确认控制消息失败")
             await self._handle_connection_error(e)
             return False
@@ -1119,11 +1065,10 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         if not receipt:
             raise ValueError("Gateway 运行时控制结果缺少原控制事件 receipt")
 
-        # W2: 序列化必须放在网络 try 之外。data 含 datetime/bytes/NaN 时
-        # json.dumps 抛 TypeError/ValueError，这是本地永久性错误——若混进
-        # 下面的网络异常分支会被计入 _consecutive_failures（3 次即拆掉健康
-        # 连接触发重连），且 engine 拿同一个不可序列化 payload 无限重试。
-        # 降级为失败结果照常结算原控制事件，让事件得到 ACK；失败回包必须带结构化错误码（控制面对缺码 fail-closed）。
+        # W2: 序列化必须留在网络 try 之外。data 含 datetime/bytes/NaN 时 json.dumps
+        # 抛的是本地永久错误，混进下面的网络分支会被计入 _consecutive_failures
+        # （满 3 次即拆掉健康连接重连），且 engine 会拿同一个 payload 无限重试。
+        # 降级为失败结果照常结算原事件；失败回包必须带结构化错误码（控制面对缺码 fail-closed）。
         try:
             data_json = json.dumps(data, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as exc:
@@ -1141,9 +1086,8 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
                 data_json=data_json,
             )
         except Exception as e:
-            # 有意保留的行为差异（相对 ack_control）：结果结算失败要计
-            # _consecutive_failures 并甄别永久错误——永久拒绝直接上抛，
-            # 让 engine 停止重试同一结算。
+            # 有意与 ack_control 不同：结果结算失败要计 _consecutive_failures 并
+            # 甄别永久错误——永久拒绝直接上抛，让 engine 停止重试同一结算。
             if is_permanent_control_result_error(e):
                 raise RuntimeError(f"Gateway 永久拒绝运行时控制结果: {e}") from e
             self._consecutive_failures += 1
@@ -1303,7 +1247,7 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         return options
 
     async def _check_protocol_capabilities(self, control_stub: Any = None) -> None:
-        """Fail closed when Gateway cannot persist runtime-control results."""
+        """Gateway 缺任一协议能力就拒绝启动（fail-closed）。"""
         from antcode_contracts import control_pb2
 
         stub = control_stub or self._control_stub
@@ -1349,7 +1293,8 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
         )
         if bool(getattr(response, "revoked", False)):
             self._lease_revoked = True
-        # P1-GW-01: 重连时 Gateway 派新 Lease 视为旧代际被剥夺，触发 self-fence 而非无缝覆盖，避免旧内存状态与新 L 争抢 ownership/PEL 双执行。
+        # P1-GW-01: 重连时 Gateway 派新 Lease = 旧代际被剥夺，必须 self-fence 而非
+        # 无缝覆盖，否则旧内存状态会与新代际争抢 ownership/PEL 造成双执行。
         new_lease_id = getattr(response, "lease_id", "") or ""
         if self._lease_id and new_lease_id and new_lease_id != self._lease_id:
             logger.warning(
@@ -1481,7 +1426,6 @@ class GatewayTransport(GatewayStatusErrorPolicy, TransportBase):
     # ==================== 私有：连接错误处理 ====================
 
     async def _handle_connection_error(self, error: Exception) -> None:
-        """处理连接错误（保留原 P0 实现的认证退避 + 重连管理逻辑）。"""
         if is_lease_fence_error(error):
             logger.error("Gateway 拒绝已失效的 Worker Lease，本进程立即 self-fence")
             await self._abort_lease_revocation()

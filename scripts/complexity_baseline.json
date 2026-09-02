@@ -1901,7 +1901,7 @@
       "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1642
+      "value": 1586
     },
     {
       "path": "services/worker/src/antcode_worker/transport/gateway/transport.py",
