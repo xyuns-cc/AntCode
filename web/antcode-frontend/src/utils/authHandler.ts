@@ -117,28 +117,27 @@ export class AuthHandler {
   }
 
   /**
-   * 检查是否为认证错误
+   * 检查是否为认证错误。
+   *
+   * 只认 HTTP 401。原先还按错误文案做子串匹配（'token' / '认证' / '登录' /
+   * 'unauthorized' / 'expired'），那是拿字符串当契约——而后端
+   * `http_exception_handler` 把**每一条** HTTPException 的 detail 原样搬进
+   * `data.message`（exceptions.py::_http_error_message），所以这几个子串筛的是全站
+   * 错误文案，不是鉴权错误。会被误判成"该登出了"的现成例子：
+   * - 400「登录密钥已过期，请重试」——改密/建号时 RSA 公钥轮换（login_crypto.py），
+   *   前端本来是靠它丢掉缓存公钥让用户原地重提交的（utils/loginEncryption.ts）；
+   * - 422 仓库扫描原样回传的 git stderr，私有库鉴权失败时含 "access token"；
+   * - 503「派发被拒绝：scheduler_authority.fencing_token=… 非法」。
+   *
+   * 不认 403：本仓 403 是"已登录但无权限"（/dashboard/metrics、/workers/stats 是
+   * 管理员专属，普通用户稳定拿 403），按登出处理会直接把普通用户踢出去。
    */
   static isAuthError(error: unknown): boolean {
     if (!error || typeof error !== 'object' || !('response' in error)) {
       return false
     }
-
-    const response = (error as { response?: { status?: number; data?: { detail?: string; message?: string } } }).response
-    if (!response) return false
-
-    const status = response.status
-    const message = response.data?.detail || response.data?.message || ''
-
-    // 检查状态码和错误消息
-    return (
-      status === 401 ||
-      message.includes('token') ||
-      message.includes('认证') ||
-      message.includes('登录') ||
-      message.includes('unauthorized') ||
-      message.includes('expired')
-    )
+    const response = (error as { response?: { status?: number } }).response
+    return response?.status === 401
   }
 
   /**

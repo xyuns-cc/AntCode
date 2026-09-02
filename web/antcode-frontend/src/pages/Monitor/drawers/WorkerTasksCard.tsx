@@ -1,4 +1,4 @@
-import { Card, Tag, Tooltip } from 'antd'
+import { Card, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import { getStatusColor, getStatusText } from '../status'
@@ -19,8 +19,20 @@ const columns: ColumnsType<MonitorTask> = [
   },
 ]
 
-export const WorkerTasksCard = ({ tasks }: { tasks: MonitorTask[] }) => (
-  <Card title="运行任务列表" style={{ marginTop: 16 }} size="small">
-    <ResponsiveTable dataSource={tasks} rowKey="id" columns={columns} minWidth={TABLE_MIN_WIDTH} pagination={false} size="small" />
+// 标题说「绑定」而不是「运行」：过滤依据是任务的 Worker 绑定配置（见 WorkerDetailDrawer），
+// 且状态不限，行里跑没跑看「状态」列。副标题写明数据源只有任务列表前 20 条 —— 这份清单是
+// 那个截断窗口的子集，不是该 Worker 的全部绑定任务，不说明就是把残缺当完整。
+export const WorkerTasksCard = ({ tasks }: { tasks: MonitorTask[] | null }) => (
+  <Card
+    title="绑定到该 Worker 的任务"
+    extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>仅取自任务列表前 20 条</Typography.Text>}
+    style={{ marginTop: 16 }}
+    size="small"
+  >
+    <ResponsiveTable
+      dataSource={tasks ?? undefined}
+      emptyDescription={tasks === null ? '任务列表加载失败' : '暂无数据'}
+      rowKey="id" columns={columns} minWidth={TABLE_MIN_WIDTH} pagination={false} size="small"
+    />
   </Card>
 )

@@ -35,31 +35,40 @@ const mapTask = (task: TaskResponseItem): MonitorTask => ({
           : 'pending',
 })
 
-const EMPTY_COUNTS: MonitorTaskCounts = { success: 0, failed: 0, running: 0, pending: 0 }
-
 // 参数只当刷新节拍：Worker 列表每 10 秒换一次引用，任务表跟着重取。映射本身不再需要
 // 它——绑定文案取自 TaskResponse 自带的 *_worker_name，不用再拿 id 去 Worker 列表里反查。
+//
+// 两个返回值都用 `null` 表示「这一路没取到」，与「后端说真的没有任务」（空数组 / 全 0）
+// 分开。过去两路走 Promise.all 且整块 catch：任一路挂掉，表格就保持空或保持上一轮的陈旧
+// 数据，除了一行 console.error 之外界面上没有任何可见信号。
 export const useTasks = (refreshSignal: unknown) => {
-  const [tasks, setTasks] = useState<MonitorTask[]>([])
-  const [counts, setCounts] = useState<MonitorTaskCounts>(EMPTY_COUNTS)
+  const [tasks, setTasks] = useState<MonitorTask[] | null>(null)
+  const [counts, setCounts] = useState<MonitorTaskCounts | null>(null)
 
   useEffect(() => {
     const loadTasks = async () => {
-      try {
-        const [response, summary] = await Promise.all([
-          taskService.getTasks({ page: 1, size: 20 }),
-          dashboardService.getDashboardStats(),
-        ])
-        setTasks((response.items || []).map(mapTask))
-        const { total, success, failed, running } = summary.tasks
+      // 各自成败：任务列表挂了不该顺带把还拿得到的状态汇总也抹掉，反之亦然。
+      const [listed, summarized] = await Promise.allSettled([
+        taskService.getTasks({ page: 1, size: 20 }),
+        dashboardService.getDashboardStats(),
+      ])
+      if (listed.status === 'fulfilled') {
+        setTasks((listed.value.items || []).map(mapTask))
+      } else {
+        console.error('加载任务列表失败:', listed.reason)
+        setTasks(null)
+      }
+      if (summarized.status === 'fulfilled') {
+        const { total, success, failed, running } = summarized.value.tasks
         setCounts({
           success,
           failed,
           running,
           pending: Math.max(total - success - failed - running, 0),
         })
-      } catch (error) {
-        console.error('加载任务失败:', error)
+      } else {
+        console.error('加载任务统计失败:', summarized.reason)
+        setCounts(null)
       }
     }
     loadTasks()

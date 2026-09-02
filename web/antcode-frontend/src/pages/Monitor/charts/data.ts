@@ -161,7 +161,17 @@ const createWorkerDataset = (
   pointHoverRadius: hasHistory ? 6 : undefined,
 })
 
-export const createTaskStatsData = (counts: MonitorTaskCounts): ChartData<'bar'> => {
+// 「没有可画的数据」的占位：一根灰色零高柱，标签写明原因。带业务配色的零高柱会被读成
+// 「任务数真的都是 0」「磁盘真的是空的」，那是把故障画成正常。
+const placeholderBar = (label: string, series: string): ChartData<'bar'> => ({
+  labels: [label],
+  datasets: [{ label: series, data: [0], backgroundColor: ['#d9d9d9'] }],
+})
+
+// null = 汇总这一路没取到（见 hooks/useTasks）。四根 0 高的彩色柱子和「一个任务都没有」
+// 长得一模一样。
+export const createTaskStatsData = (counts: MonitorTaskCounts | null): ChartData<'bar'> => {
+  if (counts === null) return placeholderBar('任务统计未取到', '任务数量')
   return {
     labels: ['成功', '失败', '运行中', '待执行'],
     datasets: [
@@ -174,20 +184,21 @@ export const createTaskStatsData = (counts: MonitorTaskCounts): ChartData<'bar'>
   }
 }
 
+// 没上报过指标的机器 disk 被 transformWorker 压成 0（见 types.ts::hasMetrics）。照单全画
+// 就是给一台从没上报过的机器挂一根写着它名字的「0% 磁盘」条——和真的空盘无法区分。
+// 与 calculateClusterMetrics 同一道过滤。
 export const createDiskUsageData = (workers: WorkerDisplayData[]): ChartData<'bar'> => {
-  if (workers.length === 0) {
-    return {
-      labels: ['暂无数据'],
-      datasets: [{ label: '磁盘使用率', data: [0], backgroundColor: ['#d9d9d9'] }],
-    }
+  const reported = workers.filter((worker) => worker.hasMetrics)
+  if (reported.length === 0) {
+    return placeholderBar(workers.length === 0 ? '暂无数据' : '无机器上报磁盘用量', '磁盘使用率')
   }
   return {
-    labels: workers.map((worker) => worker.name),
+    labels: reported.map((worker) => worker.name),
     datasets: [
       {
         label: '磁盘使用率 (%)',
-        data: workers.map((worker) => worker.disk),
-        backgroundColor: workers.map((worker) =>
+        data: reported.map((worker) => worker.disk),
+        backgroundColor: reported.map((worker) =>
           worker.disk > 80 ? '#ff4d4f' : worker.disk > 60 ? '#faad14' : '#722ed1'
         ),
       },

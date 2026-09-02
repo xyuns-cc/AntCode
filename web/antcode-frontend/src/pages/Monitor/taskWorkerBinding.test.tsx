@@ -35,7 +35,7 @@ describe('监控页任务表的 Worker 列显示的是绑定，不再把 auto �
     const { result } = renderHook(() => useTasks(null))
 
     await waitFor(() => expect(result.current.tasks).toHaveLength(2))
-    expect(result.current.tasks.map((task) => task.worker)).toEqual(['自动选择', 'node-01'])
+    expect(result.current.tasks?.map((task) => task.worker)).toEqual(['自动选择', 'node-01'])
   })
 
   it('拿不到 Worker 列表也不影响绑定文案 —— 它不再依赖 Worker 列表', async () => {
@@ -49,7 +49,7 @@ describe('监控页任务表的 Worker 列显示的是绑定，不再把 auto �
     const { result } = renderHook(() => useTasks(undefined))
 
     await waitFor(() => expect(result.current.tasks).toHaveLength(1))
-    expect(result.current.tasks[0].worker).toBe('自动选择')
-    expect(result.current.tasks[0].worker).not.toBe('未分配')
+    expect(result.current.tasks?.[0].worker).toBe('自动选择')
+    expect(result.current.tasks?.[0].worker).not.toBe('未分配')
   })
 })

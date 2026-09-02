@@ -38,6 +38,7 @@ import { Line, Doughnut, Bar } from 'react-chartjs-2'
 import { workerService } from '@/services/workers'
 import type { ClusterSpiderStats, SpiderStatsHistoryPoint, Worker } from '@/types'
 import Logger from '@/utils/logger'
+import MetricCard, { NO_METRIC } from './MetricCard'
 
 ChartJS.register(
   CategoryScale, LinearScale, PointElement, LineElement, BarElement,
@@ -55,79 +56,6 @@ interface SpiderStatsTabProps {
 const formatNumber = (num: number): string => {
   return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 }
-
-// 深色主题指标卡片 - 统一设计风格（方形圆角图标 + 装饰圆）
-const MetricCard: React.FC<{
-  title: string
-  value: number | string
-  suffix?: string
-  subValue?: string
-  icon: React.ReactNode
-  accentColor: string
-  trend?: number
-}> = memo(({ title, value, suffix, subValue, icon, accentColor, trend }) => {
-  const { token } = theme.useToken()
-  return (
-    <div style={{
-      background: token.colorBgContainer,
-      border: `1px solid ${token.colorBorderSecondary}`,
-      borderRadius: 12,
-      padding: '14px 16px',
-      position: 'relative',
-      overflow: 'hidden',
-      height: 110,
-      transition: 'border-color 0.2s ease, box-shadow 0.2s ease'
-    }}>
-      {/* 右上角装饰大圆 */}
-      <div style={{
-        position: 'absolute',
-        right: -20,
-        top: -20,
-        width: 80,
-        height: 80,
-        borderRadius: '50%',
-        background: `${accentColor}10`
-      }} />
-      {/* 右上角方形圆角图标 */}
-      <div style={{
-        position: 'absolute',
-        right: 12,
-        top: 12,
-        width: 36,
-        height: 36,
-        borderRadius: 10,
-        background: `${accentColor}20`,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: 16,
-        color: accentColor,
-        zIndex: 1
-      }}>
-        {icon}
-      </div>
-      {/* 内容区 */}
-      <div style={{ paddingRight: 50, position: 'relative', zIndex: 1 }}>
-        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>{title}</Text>
-        <Flex align="baseline" gap={4}>
-          <span style={{ color: token.colorText, fontSize: 24, fontWeight: 600, lineHeight: 1 }}>
-            {typeof value === 'number' ? value.toLocaleString() : value}
-          </span>
-          {suffix && <Text type="secondary" style={{ fontSize: 12 }}>{suffix}</Text>}
-        </Flex>
-        {/* subValue 和 trend 放在同一行 */}
-        <Flex align="center" gap={8} style={{ marginTop: 6 }}>
-          {subValue && <Text type="secondary" style={{ fontSize: 11 }}>{subValue}</Text>}
-          {trend !== undefined && (
-            <span style={{ color: trend >= 0 ? token.colorSuccess : token.colorError, fontSize: 11 }}>
-              {trend >= 0 ? '+' : ''}{trend.toFixed(1)}% <Text type="secondary" style={{ fontSize: 11 }}>较上分钟</Text>
-            </span>
-          )}
-        </Flex>
-      </div>
-    </div>
-  )
-})
 
 const SpiderStatsTab: React.FC<SpiderStatsTabProps> = memo(({ refreshKey }) => {
   const { token } = theme.useToken()
@@ -334,9 +262,10 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
     <Skeleton loading={loading} active paragraph={{ rows: 12 }}>
       {/* 顶部状态栏 */}
       <Flex justify="space-between" align="center" style={{ marginBottom: 16 }}>
+        {/* 没拿到 stats 时不点绿灯：绿灯 + 「0 Worker 在线」读起来仍像一次正常读数。 */}
         <Space>
-          <Badge status="success" />
-          <Text type="secondary">{stats?.workerCount || 0} Worker 在线</Text>
+          <Badge status={stats ? 'success' : 'default'} />
+          <Text type="secondary">{stats?.workerCount ?? NO_METRIC} Worker 在线</Text>
         </Space>
         <Space>
           <Text type="secondary" style={{ fontSize: 12 }}>更新于 {lastUpdate.toLocaleTimeString()}</Text>
@@ -344,12 +273,13 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
         </Space>
       </Flex>
 
-      {/* 核心指标卡片只展示后端提供的真实数据。 */}
+      {/* 核心指标卡片只展示后端提供的真实数据；stats 为 null（这一轮没取到）时四张卡一律
+          交给 MetricCard 渲染成占位，不再 `|| 0` 折算成「集群很闲」。 */}
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={12} sm={12} md={6}><MetricCard title="最近完成请求量 (60秒)" value={stats?.clusterRequestsPerMinute?.toFixed(0) || 0} icon={<ThunderboltOutlined />} accentColor="#667eea" /></Col>
-        <Col xs={12} sm={12} md={6}><MetricCard title="抓取数据总数" value={stats?.totalItemsScraped || 0} icon={<DatabaseOutlined />} accentColor="#52c41a" /></Col>
-        <Col xs={12} sm={12} md={6}><MetricCard title="平均响应延迟" value={stats?.avgLatencyMs?.toFixed(0) || 0} suffix="ms" icon={<FieldTimeOutlined />} accentColor="#faad14" /></Col>
-        <Col xs={12} sm={12} md={6}><MetricCard title="异常 & 错误" value={stats?.totalErrors || 0} icon={<WarningOutlined />} accentColor="#ff4d4f" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="最近完成请求量 (60秒)" value={stats?.clusterRequestsPerMinute?.toFixed(0)} icon={<ThunderboltOutlined />} accentColor="#667eea" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="抓取数据总数" value={stats?.totalItemsScraped} icon={<DatabaseOutlined />} accentColor="#52c41a" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="平均响应延迟" value={stats?.avgLatencyMs?.toFixed(0)} suffix="ms" icon={<FieldTimeOutlined />} accentColor="#faad14" /></Col>
+        <Col xs={12} sm={12} md={6}><MetricCard title="异常 & 错误" value={stats?.totalErrors} icon={<WarningOutlined />} accentColor="#ff4d4f" /></Col>
       </Row>
 
       {/* 流量趋势 + 状态码分布 */}
@@ -360,7 +290,7 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
           </Card>
         </Col>
         <Col xs={24} lg={8}>
-          <Card title={<Flex align="center" gap={6}><PieChartOutlined style={{ color: '#722ed1' }} /><span style={{ fontSize: 14 }}>HTTP 状态码分布</span></Flex>} extra={<Tooltip title={`${lastUpdate.toLocaleTimeString()} 更新`}><Button type="text" size="small" icon={<SyncOutlined spin={refreshing} />}>{stats?.workerCount || 0} Worker</Button></Tooltip>} style={{ borderRadius: 12, height: '100%' }} styles={{ body: { padding: '12px 16px' } }}>
+          <Card title={<Flex align="center" gap={6}><PieChartOutlined style={{ color: '#722ed1' }} /><span style={{ fontSize: 14 }}>HTTP 状态码分布</span></Flex>} extra={<Tooltip title={`${lastUpdate.toLocaleTimeString()} 更新`}><Button type="text" size="small" icon={<SyncOutlined spin={refreshing} />}>{stats?.workerCount ?? NO_METRIC} Worker</Button></Tooltip>} style={{ borderRadius: 12, height: '100%' }} styles={{ body: { padding: '12px 16px' } }}>
             <div style={{ height: 180 }}>{statusCodeData ? <Doughnut data={statusCodeData} options={doughnutOptions} /> : <Empty description="暂无数据" />}</div>
             <Row gutter={8} style={{ marginTop: 12 }}>
               <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Error (4xx/5xx)</Text><Text strong style={{ color: token.colorError, fontSize: 12 }}>{httpErrorShare}</Text></div></Col>

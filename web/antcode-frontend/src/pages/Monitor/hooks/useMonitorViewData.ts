@@ -16,7 +16,6 @@ import {
 import { calculateMonitorStats, createAlerts } from '../data'
 import type {
   ClusterHistory,
-  MonitorTask,
   MonitorTaskCounts,
   PerformancePeriod,
   WorkerDisplayData,
@@ -26,8 +25,8 @@ import type {
 interface ViewDataInput {
   token: GlobalToken
   workers: WorkerDisplayData[]
-  tasks: MonitorTask[]
-  taskCounts: MonitorTaskCounts
+  // null = 汇总没取到，交给 createTaskStatsData 画成占位而不是四根 0 高柱子。
+  taskCounts: MonitorTaskCounts | null
   lastChecked: string
   period: PerformancePeriod
   selectedWorker: WorkerDisplayData | null

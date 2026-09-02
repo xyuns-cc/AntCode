@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { calculateClusterMetrics, createTaskStatsData, createTrendData } from './data'
+import { calculateClusterMetrics, createDiskUsageData, createTaskStatsData, createTrendData } from './data'
+import { transformWorker } from '../data'
 import type { ClusterHistory, WorkerDisplayData } from '../types'
+import type { Worker, WorkerMetrics } from '@/types'
 
 const displayWorker = (overrides: Partial<WorkerDisplayData>): WorkerDisplayData => ({
   id: 'w-1',
@@ -62,6 +64,96 @@ describe('createTaskStatsData', () => {
     const chart = createTaskStatsData({ success: 120, failed: 30, running: 25, pending: 15 })
 
     expect(chart.datasets[0].data).toEqual([120, 30, 25, 15])
+  })
+
+  // useTasks 拿不到 /dashboard/summary 时给 null。四根 0 高的彩色柱子和「真的一个任务
+  // 都没有」长得一模一样，那就是把这一路的失败画成了正常。
+  it('汇总真的全是 0 时照常画那四根柱子', () => {
+    const chart = createTaskStatsData({ success: 0, failed: 0, running: 0, pending: 0 })
+
+    expect(chart.labels).toEqual(['成功', '失败', '运行中', '待执行'])
+    expect(chart.datasets[0].data).toEqual([0, 0, 0, 0])
+  })
+
+  it('汇总没取到时不画那四根柱子', () => {
+    const chart = createTaskStatsData(null)
+
+    expect(chart.labels).toEqual(['任务统计未取到'])
+    expect(chart.datasets[0].data).toEqual([0])
+  })
+})
+
+/**
+ * 磁盘条要和集群均值走同一道过滤：transformWorker 把没上报过指标的机器压成 disk=0，
+ * 照单全画就会给一台从没上报过的机器挂一根写着它名字的「0% 磁盘」条——和真的空盘无法
+ * 区分。上一轮给 CPU/内存补了 hasMetrics，磁盘这条漏了。
+ *
+ * 判据成对：真的上报了 0% 必须画出来，从没上报过必须一根都不画。
+ */
+describe('createDiskUsageData 只画上报过指标的机器', () => {
+  it('真的上报了 0% 的机器照常出现在图上', () => {
+    const chart = createDiskUsageData([
+      displayWorker({ id: 'a', name: 'node-a', hasMetrics: true, disk: 0 }),
+      displayWorker({ id: 'b', name: 'node-b', hasMetrics: true, disk: 91 }),
+    ])
+
+    expect(chart.labels).toEqual(['node-a', 'node-b'])
+    expect(chart.datasets[0].data).toEqual([0, 91])
+  })
+
+  it('从没上报过的机器既不占标签，也不贡献一根 0% 条', () => {
+    const chart = createDiskUsageData([
+      displayWorker({ id: 'a', name: 'node-a', hasMetrics: true, disk: 91 }),
+      displayWorker({ id: 'b', name: 'silent', hasMetrics: false, disk: 0 }),
+    ])
+
+    // 旧实现：labels=['node-a','silent']、data=[91,0]。两条全等断言同时钉正值与错值。
+    expect(chart.labels).toEqual(['node-a'])
+    expect(chart.datasets[0].data).toEqual([91])
+  })
+
+  it('有机器但一台都没上报过时，占位说的是没上报，不是「暂无数据」', () => {
+    const chart = createDiskUsageData([displayWorker({ name: 'silent', hasMetrics: false })])
+
+    expect(chart.labels).toEqual(['无机器上报磁盘用量'])
+  })
+})
+
+const apiWorker = (name: string, metrics: WorkerMetrics | null): Worker => ({
+  id: `id-${name}`,
+  name,
+  host: '192.168.1.250',
+  port: 8080,
+  status: 'online',
+  createdAt: '2026-09-01T00:00:00Z',
+  metrics,
+})
+
+const reportedMetrics = (disk: number): WorkerMetrics => ({
+  cpu: 5, memory: 6, disk, taskCount: 0, runningTasks: 0, projectCount: 0, envCount: 0, uptime: 60,
+})
+
+/**
+ * 钉的是链路，不是手搓 fixture。本仓抓到过这种假绿：transformWorker 把 hasMetrics 写死
+ * true，集群指标那几条用例照样全绿——因为判据只喂了自己造的 WorkerDisplayData，从没让
+ * 后端形状走一遍映射。这条从「后端回了 metrics: null」出发，写死 true 就会红。
+ */
+describe('磁盘图的过滤依据来自 transformWorker 的映射结果', () => {
+  it('后端回 metrics=null 的机器，经 transformWorker 后不进磁盘图', () => {
+    const chart = createDiskUsageData([
+      transformWorker(apiWorker('node-a', reportedMetrics(91))),
+      transformWorker(apiWorker('silent', null)),
+    ])
+
+    expect(chart.labels).toEqual(['node-a'])
+    expect(chart.datasets[0].data).toEqual([91])
+  })
+
+  it('后端回 disk=0 的机器，经 transformWorker 后照常进图', () => {
+    const chart = createDiskUsageData([transformWorker(apiWorker('node-a', reportedMetrics(0)))])
+
+    expect(chart.labels).toEqual(['node-a'])
+    expect(chart.datasets[0].data).toEqual([0])
   })
 })
 

@@ -23,7 +23,6 @@ export const useMonitorController = () => {
   const view = useMonitorViewData({
     token,
     workers,
-    tasks,
     taskCounts,
     lastChecked,
     period: performancePeriod,

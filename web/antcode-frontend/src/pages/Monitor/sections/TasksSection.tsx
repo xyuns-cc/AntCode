@@ -8,7 +8,8 @@ import { getStatusColor, getStatusText } from '../status'
 import type { MonitorTask } from '../types'
 
 interface TasksSectionProps {
-  tasks: MonitorTask[]
+  // null = 任务列表这一路没取到（见 hooks/useTasks），必须和「一条任务都没有」分开显示。
+  tasks: MonitorTask[] | null
   taskStatsData: ChartData<'bar'>
   diskUsageData: ChartData<'bar'>
   taskBarOptions: ChartOptions<'bar'>
@@ -45,9 +46,13 @@ const buildColumns = (onViewTask: (taskId: string) => void): ColumnsType<Monitor
 // 这 20 条截断窗口上——按"失败"筛出来的不是全部失败任务，而是"前 20 条里失败的"，属于把
 // 残缺结果伪装成完整结果。真正的任务筛选在 /tasks 页（状态/项目/Worker 三个 Select + 搜索，
 // 走后端分页），这里不再重造一个会骗人的半成品。
-const TaskTable = ({ tasks, onViewTask }: { tasks: MonitorTask[]; onViewTask: (taskId: string) => void }) => (
+const TaskTable = ({ tasks, onViewTask }: { tasks: MonitorTask[] | null; onViewTask: (taskId: string) => void }) => (
   <Card size="small" title={<span style={{ fontSize: 14 }}><BugOutlined /> 关键任务状态</span>}>
-    <ResponsiveTable dataSource={tasks} rowKey="id" columns={buildColumns(onViewTask)} minWidth={TABLE_MIN_WIDTH} pagination={{ pageSize: 5, size: 'small' }} size="small" />
+    <ResponsiveTable
+      dataSource={tasks ?? undefined}
+      emptyDescription={tasks === null ? '任务列表加载失败' : '暂无数据'}
+      rowKey="id" columns={buildColumns(onViewTask)} minWidth={TABLE_MIN_WIDTH} pagination={{ pageSize: 5, size: 'small' }} size="small"
+    />
   </Card>
 )
 

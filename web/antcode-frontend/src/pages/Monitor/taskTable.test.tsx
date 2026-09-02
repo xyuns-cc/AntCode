@@ -109,7 +109,7 @@ describe('Monitor 任务表不展示任务级 CPU/内存', () => {
 
     await waitFor(() => expect(result.current.tasks).toHaveLength(1))
 
-    const [mapped] = result.current.tasks
+    const mapped = result.current.tasks?.[0]
     // 正向确认映射本身是通的，避免"字段不存在"只是因为整条链路没跑起来。
     expect(mapped).toMatchObject({ id: 'task-1', name: 'data-sync-daily', worker: 'node-01', status: 'running' })
     expect(mapped).not.toHaveProperty('cpu')
