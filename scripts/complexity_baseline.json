@@ -1487,7 +1487,7 @@
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1730
+      "value": 1597
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",
@@ -1511,7 +1511,7 @@
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "Engine._execute_task",
       "rule": "PLR0915",
-      "value": 72
+      "value": 71
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",

@@ -79,12 +79,10 @@ class _RuntimeControlResult:
     error: str
 
 
-# ---------------------------------------------------------------------------
-# RuntimeControl 参数读取辅助。新协议 (control_pb2.RuntimeControl.action_typed.
-# generic.args) 是 ``map<string, string>``（值全是字符串）；Direct 模式旧路径仍可
-# 能传 typed dict（list / int / bool 是原生类型）。下面这组函数同时支持两种 shape，
-# 保留 engine 现有 action handler 的语义。
-# ---------------------------------------------------------------------------
+# RuntimeControl 参数读取辅助：新协议
+# (control_pb2.RuntimeControl.action_typed.generic.args) 是 ``map<string, string>``，
+# 值全是字符串；Direct 旧路径仍可能传 typed dict（list / int / bool 是原生类型）。
+# 下面这组函数同时吃两种 shape。
 def _arg_str(args: dict, key: str, default: str | None = None) -> str | None:
     value = args.get(key, default)
     if value is None:
@@ -118,13 +116,11 @@ def _arg_list(args: dict, key: str, default: list | None = None) -> list:
         text = value.strip()
         if not text:
             return []
-        # JSON 数组优先
         if text.startswith("[") and text.endswith("]"):
             with contextlib.suppress(Exception):
                 parsed = json.loads(text)
                 if isinstance(parsed, list):
                     return parsed
-        # 退化：逗号分隔
         return [item.strip() for item in text.split(",") if item.strip()]
     if isinstance(value, tuple):
         return list(value)
@@ -132,13 +128,7 @@ def _arg_list(args: dict, key: str, default: list | None = None) -> list:
 
 
 class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
-    """
-    引擎核心
-
-    主循环：poll -> schedule -> execute -> report
-
-    Requirements: 4.1, 4.5, 4.6, 4.7, 4.8
-    """
+    """引擎核心。Requirements: 4.1, 4.5, 4.6, 4.7, 4.8"""
 
     def __init__(
         self,
@@ -160,10 +150,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         adaptive_limits_provider: Callable[[int | None], dict[str, int]] | None = None,
         capacity_observer: Callable[[int], None] | None = None,
     ):
-        # P2-#31: ``transport`` 与 ``executor`` 是核心依赖，按抽象基类标注；
-        # 其他 manager / registry 仍保留 Any，因为它们的接口尚未稳定
-        # （flow_controller / plugin_registry / log_manager_factory /
-        # project_fetcher / artifact_manager 没有统一基类）。
+        # 其余 manager / registry 保留 Any 是因为它们没有统一基类，不是漏标。
         self._transport: TransportBase = transport
         self._executor: BaseExecutor = executor
         self._flow_controller = flow_controller
@@ -180,8 +167,8 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
 
         self._scheduler = Scheduler(max_queue_size=max_concurrent * 2)
         self._state_manager = StateManager()
-        # FN-01(c) + P1-SM-03 (round6): tombstone 键要带 ns/wid 维度才能落进本
-        # Worker 的最小权限 ACL 面，故由 wiring 注入，引擎不自行拼装 Redis 键
+        # tombstone 键要带 ns/wid 维度才能落进本 Worker 的最小权限 ACL 面，
+        # 故由 wiring 注入，引擎不自行拼装 Redis 键。
         self._cancel_tombstones = cancel_tombstones or CancelTombstones()
 
         self._running = False
@@ -192,21 +179,16 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         self._worker_shrink_tasks: set[asyncio.Task] = set()
         self._next_worker_id = 0
         self._runtime_control_semaphore = asyncio.Semaphore(1)
-        # P2-#37: bounded set 防止 ``_handle_runtime_control`` 派出的 task
-        # 被 GC 回收（asyncio.create_task 返回值丢弃会触发警告，长任务可能
-        # 被取消）；done_callback 自动从集合移除。
+        # 持有强引用防止 ``_handle_runtime_control`` 派出的 task 被 GC 回收
+        # （丢弃 create_task 返回值时长任务可能被取消）；done_callback 负责移除。
         self._inflight_controls: set[asyncio.Task] = set()
         self._runtime_control_tasks: dict[str, asyncio.Task] = {}
         self._runtime_control_receipts: dict[asyncio.Task, str] = {}
 
-        # 资源限制
         self._policies.resource.max_concurrent = max_concurrent
         self._policies.resource.memory_limit_mb = memory_limit_mb
         self._policies.resource.cpu_limit_seconds = cpu_limit_seconds
 
-        # P1-15: worker_id 缓存与续租后台任务。首次调用 _resolve_worker_id
-        # 时从 transport / config 里解析并缓存;若最终解析不到就 raise,
-        # 不再静默用 "unknown"。
         self._worker_id_cache: str | None = None
         self._ownership_renewal_task: asyncio.Task | None = None
         self._ownership_renew_wakeup: asyncio.Event | None = None  # P1-GW-02
@@ -214,12 +196,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         self._ownership_fenced = False
         self._released_ownership = ReleasedOwnershipLedger()
 
-        # P1-26: 优雅缩容用的 drain 集合。_resize_workers 缩容时不直接
-        # cancel worker task(会让 ProcessExecutor 的子进程孤儿化, master 侧
-        # 任务永卡 DISPATCHING / PEL reclaim 后另一台 worker 双跑), 而是把
-        # 要退的 worker task 塞进这里, worker 在下一轮起点自然退出。
-        # 超过 grace period 才走 self.cancel(kill 子进程 + 上报 CANCELLED),
-        # 最后才 hard cancel 兜底。
+        # 缩容用的 drain 集合，三段式关闭见 ``_shrink_workers``。
         self._draining_worker_tasks: set[asyncio.Task] = set()
         self._worker_run_ids: dict[asyncio.Task, str] = {}
         self._forced_cancel_relay_errors: dict[str, str] = {}
@@ -237,7 +214,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         return self._state_manager
 
     async def start(self) -> None:
-        """启动引擎"""
         if self._running:
             return
 
@@ -253,16 +229,13 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
 
         await self._scheduler.start()
 
-        # 启动轮询任务
         self._poll_task = asyncio.create_task(self._poll_loop())
-
-        # 启动控制通道轮询
         self._control_task = asyncio.create_task(run_with_generation_fence(self, self._control_loop))
 
         for _ in range(self._max_concurrent):
             self._worker_tasks.append(self._create_worker_task())
 
-        # P1-15: 后台续租跨机归属键,避免长跑任务 TTL 到期被重投另一台
+        # 续租跨机归属键，否则长跑任务 TTL 到期后会被重投到另一台。
         self._ownership_renewal_task = asyncio.create_task(self._renew_run_ownership_loop())
 
         logger.info(f"引擎已启动 (workers={self._max_concurrent})")
@@ -272,7 +245,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         await stop_engine(self, grace_period)
 
     async def _poll_loop(self) -> None:
-        """任务轮询循环"""
         while self._polling:
             flow_acquired = False
             uncommitted_receipt: str | None = None
@@ -282,7 +254,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                     await asyncio.sleep(0.5)
                     continue
 
-                # 检查是否有空间
                 if self._scheduler.is_full:
                     await asyncio.sleep(1)
                     continue
@@ -293,7 +264,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                         await asyncio.sleep(0.1)
                         continue
 
-                # 拉取任务
                 task_msg = await self._transport.poll_task(timeout=self._policies.timeout.poll_timeout)
                 if self._flow_controller:
                     self._flow_controller.on_success()
@@ -302,7 +272,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                     continue
                 uncommitted_receipt = getattr(task_msg, "receipt", None)
 
-                # 创建运行上下文
                 labels = {}
                 runtime_env_name = getattr(task_msg, "runtime_env_name", "") or ""
                 if runtime_env_name:
@@ -325,7 +294,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                     continue
                 admitted_run_id = run_id
 
-                # 入队
                 await self._scheduler.enqueue(
                     run_id=run_id,
                     data=(context, task_msg),
@@ -352,12 +320,12 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
 
     async def _admit_polled_task(self, run_id: str, task_msg: Any) -> bool:
         """poll 准入：tombstone → 去重 → ownership fence；False=已按各自语义处置。"""
-        # FN-01(c): 取消先于任务到达时 cancel() 记了 tombstone；命中即按
-        # CANCELLED 结算并 ACK，任务绝不执行。
+        # 取消先于任务到达时 cancel() 记了 tombstone；命中即按 CANCELLED 结算并
+        # ACK，任务绝不执行。
         if await self._cancel_tombstones.consume(run_id):
             await self._settle_tombstoned_task(run_id, task_msg)
             return False
-        # B2: 活跃执行只去重；执行已结束的重投取得结算恢复权，绝不重跑业务。
+        # 活跃执行只去重；执行已结束的重投取得结算恢复权，绝不重跑业务。
         _, is_new_local = await self._state_manager.add_if_new(run_id, task_msg.task_id, receipt=task_msg.receipt)
         if not is_new_local:
             recover = await self._state_manager.reserve_settlement_recovery(run_id, task_msg.receipt)
@@ -376,7 +344,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             return True
         logger.warning(f"跳过重复投递（其它 worker 已持有 run）: run_id={run_id}")
         with contextlib.suppress(Exception):
-            # 从本地状态清理（我们没真的接手）
             await self._state_manager.remove(run_id)
         receipt = getattr(task_msg, "receipt", None)
         if receipt:
@@ -388,7 +355,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         return False
 
     async def _control_loop(self) -> None:
-        """控制通道轮询（取消/kill）"""
         while self._running:
             try:
                 if not self._transport or not self._transport.is_connected:
@@ -406,7 +372,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                 await asyncio.sleep(1)
 
     async def _dispatch_control(self, control: ControlMessage) -> None:
-        """P0-03a: 从 _control_loop 拆出的分派 + ACK,C901 12 → 11。"""
+        """按 control_type 分派并 ACK；runtime_manage 异步执行，ACK 由它自己发。"""
         if control.control_type in ("cancel", "kill"):
             await self._invoke_cancel_control(control)
         elif control.control_type == "config_update":
@@ -472,12 +438,8 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         await asyncio.gather(*pending, return_exceptions=True)
         raise TimeoutError(f"运行时控制停止等待超时: pending={len(pending)}")
 
-    # ------------------------------------------------------------------
-    # RuntimeControl action handlers。P2-#32: 原 ``_handle_runtime_control`` 是
-    # 14-elif 长链（路由 + 参数解码 + 业务调用混作一团），现拆成 ``_ACTION_HANDLERS``
-    # 静态表做路由、各 ``_action_*`` 方法做参数解析 + uv_manager 调用、上层只剩
-    # dispatch + 信号量 + 异常归一。新增 action 只需写方法并在表里登记。
-    # ------------------------------------------------------------------
+    # RuntimeControl action handlers：新增 action = 写一个 ``_action_*`` 方法并在
+    # ``_ACTION_HANDLERS`` 里登记，不要再往调用方加分支。
     async def _action_list_envs(self, data: dict) -> Any:
         from antcode_worker.runtime.uv_manager import uv_manager
 
@@ -576,8 +538,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
 
         return await uv_manager.get_platform_info_async()
 
-    # 静态路由表：``action`` 字符串 → ``Engine`` 实例方法。
-    # ``_handle_runtime_control`` 根据 action 查表，找不到就报 unknown action。
     _ACTION_HANDLERS: dict[
         str,
         Callable[[Engine, dict], Awaitable[Any]],
@@ -594,28 +554,20 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
     }
 
     async def _handle_runtime_control(self, control: ControlMessage) -> None:
-        """处理运行时管理控制消息
+        """处理运行时管理控制消息。
 
-        新协议 (control_pb2.RuntimeControl) 字段抽取规则：
-        - ``request_id`` / ``action`` 从 ControlMessage.payload 顶层读
-        - ``args`` 是 typed map<string,string>（GenericAction.args），
-          通过 ``_arg_*`` 帮助函数解码为原 dict 行为兼容的类型
-        - 旧路径还有 ``payload`` / ``reply_stream`` 字段，这里 fallback 读
-          ``payload`` 保持兼容（Direct 模式 P3 收尾前仍按 dict 走）
-        - Gateway 结果通过 ``AckControl`` 携带结构化数据回报；Gateway 从
-          原始受认证事件派生 reply stream，Worker 不直接指定 Redis key
-
-        P2-#32: 路由从 14 elif 链改为 ``_ACTION_HANDLERS`` 表驱动。
+        字段抽取：``request_id`` / ``action`` 在 payload 顶层；``args`` 是新协议的
+        typed ``map<string,string>``，Direct 旧路径退回嵌套 ``payload`` dict。
+        Gateway 侧结果通过 ``AckControl`` 回报，reply stream 由 Gateway 从原始受
+        认证事件派生——Worker 不得自己指定 Redis key。
         """
         payload = control.payload or {}
         action = payload.get("action", "")
         request_id = payload.get("request_id", "")
         if not control.receipt:
-            # 无 receipt 的事件没有 settlement 通路，只能 fail-fast
-            # （_schedule_runtime_control 已前置拦截，这里是兜底防御）。
+            # 无 receipt 的事件没有 settlement 通路，只能 fail-fast。
             raise RuntimeError("运行时控制事件缺少 receipt")
         if not request_id:
-            # 有 receipt 但缺 request_id 的畸形事件必须就地 ACK 丢弃。
             logger.warning(
                 "丢弃缺少 request_id 的运行时控制事件: action={} receipt={}",
                 action,
@@ -627,7 +579,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                 logger.exception("畸形运行时控制事件 ACK 失败，等待重投后重试")
                 raise
             return
-        # 新协议优先用 typed args；旧路径 fallback 到 payload 嵌套 dict
         data = payload.get("args") or payload.get("payload") or {}
 
         handler = self._ACTION_HANDLERS.get(action)
@@ -681,24 +632,21 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             retry_delay = min(retry_delay * 2, RUNTIME_RESULT_RETRY_MAX_SECONDS)
 
     async def _worker_loop(self, worker_id: int) -> None:
-        """工作协程"""
         logger.debug(f"Worker-{worker_id} 启动")
         my_task = asyncio.current_task()
 
         while self._running:
-            # P1-26: 缩容优雅退出 —— 被 _resize_workers 塞进 drain 集合的
-            # worker 会在下一轮起点自然退出,让在途任务先跑完再退。
+            # 缩容优雅退出：drain 标记只在轮次起点生效，让在途任务先跑完。
             if my_task is not None and my_task in self._draining_worker_tasks:
                 self._draining_worker_tasks.discard(my_task)
                 logger.info(f"Worker-{worker_id} drain 完成, 优雅退出")
                 return
 
-            # active_context 在 try 外面声明, 让 except CancelledError 分支
-            # 也能拿到 —— 强制 cancel 时需要它触发 executor.cancel + 上报
-            # CANCELLED 终态, 否则子进程孤儿化 + master 侧永卡 DISPATCHING。
+            # 必须声明在 try 外：except CancelledError 分支要靠它触发
+            # executor.cancel + 上报 CANCELLED，否则子进程孤儿化 + master 永卡
+            # DISPATCHING。
             active_context: RunContext | None = None
             try:
-                # 从队列取任务
                 item = await self._scheduler.dequeue(timeout=1.0)
                 if item is None:
                     continue
@@ -708,34 +656,25 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                 if my_task is not None:
                     self._worker_run_ids[my_task] = context.run_id
 
-                # P5.4: 把 TaskDispatch 携带的 traceparent 绑定到当前 asyncio.Task
-                # 的 ContextVar,之后 logger / transport.report_result /
-                # send_log_batch 等出站点都自动透传同一个 trace,构成 Master ↔
-                # Worker 端到端链路。transport 在 poll_task 后用 setattr 把
-                # dispatch.trace.traceparent 挂到 task_msg 上(dataclass 无此字段,
-                # 靠动态属性);拿不到时新起一个 trace,保证仍有 trace_id 可贴。
+                # 把入站 traceparent 绑到本 Task 的 ContextVar，之后 logger /
+                # report_result / send_log_batch 等出站点自动透传同一个 trace。
+                # ``traceparent`` 是 transport 在 poll_task 后 setattr 上去的动态
+                # 属性，TaskMessage dataclass 上没有这个字段。
                 inbound_traceparent = getattr(task_msg, "traceparent", "") or ""
                 if inbound_traceparent:
-                    # 从父 traceparent 派生子 span: 同一 trace_id,新 span_id
                     set_current_trace(child_span(inbound_traceparent).traceparent)
                 else:
                     set_current_trace(new_trace().traceparent)
 
                 result = await self._execute_or_resume_settlement(context, task_msg)
-
-                # 上报结果
                 await self._report_result(context, result)
                 active_context = None
 
             except asyncio.CancelledError:
-                # P1-26: 强制取消分支 —— 直接 task.cancel() 会让 ProcessExecutor 的
-                # 子进程孤儿化(asyncio 只 cancel 读 pipe 的协程,不 kill subprocess),
-                # master 看不到终态、PEL reclaim 后新 worker 又跑一遍,外部副作用双写。
-                # 这里兜底: 1) executor.cancel(run_id) → _do_cancel → _terminate_process,
-                # SIGTERM + grace + SIGKILL 确保子进程真死; 2) report_result 上报
-                # status=CANCELLED,master 走 CAS 终态吸收,PEL 被 ACK 不再 reclaim。
-                # 正常缩容(shrink drain flag 命中)走上面的 return;只有 grace 超时被
-                # hard cancel 才到这里。
+                # 只有 grace 超时被 hard cancel 才走到这里（正常缩容命中上面的
+                # drain return）。必须兜底 kill + 上报：asyncio 的 cancel 只中断读
+                # pipe 的协程、不 kill subprocess，留下的孤儿进程会继续产生外部副
+                # 作用，master 看不到终态，PEL reclaim 后另一台 worker 再跑一遍。
                 if active_context is not None:
                     await self._handle_forced_cancel(active_context, worker_id)
                 break
@@ -757,13 +696,10 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         return result
 
     async def _handle_forced_cancel(self, context: RunContext, worker_id: int) -> None:
-        """P1-26: worker 被 hard cancel 时的清理路径。
+        """worker 被 hard cancel 时的清理路径，三件事缺一不可：
 
-        走这里意味着 ``_worker_loop`` 已经被 ``task.cancel()`` 中断,
-        必须尽力做到:
-        - 子进程被 SIGTERM/SIGKILL,不再产生外部副作用
-        - master 侧看到 CANCELLED 终态,dispatch/runtime 都进终态吸收态
-        - PEL 消息被 ACK,不会被其它 worker reclaim 后再跑一遍
+        子进程被 SIGTERM/SIGKILL（不再产生外部副作用）、master 侧看到 CANCELLED
+        终态、PEL 消息被 ACK（不会被其它 worker reclaim 后再跑一遍）。
         """
         run_id = context.run_id
         logger.warning(f"Worker-{worker_id} 被强制取消, 清理在途任务: run_id={run_id}")
@@ -798,7 +734,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         )
 
     async def _execute_task(self, context: RunContext, task_msg: TaskMessage) -> ExecResult:
-        """执行单个任务"""
         run_id = context.run_id
         started_at = datetime.now()
         log_manager = None
@@ -807,30 +742,24 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         spool_relayed = False
 
         try:
-            # 转换状态
             if not await self._state_manager.transition(run_id, RunState.PREPARING):
                 raise RuntimeError(f"任务无法进入 PREPARING 状态: run_id={run_id}")
 
             if await self._is_cancel_requested(run_id):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
 
-            # P1-17: worker 收到任务后必须先主动上报一次 status=RUNNING，复用
-            # transport.report_result 的 task:result Stream；master.result_loop →
-            # task_run_service.update_result 把 dispatch_status → ACKED、runtime_status →
-            # RUNNING(见 STATUS_MAPPING["running"])，终态保护不翻转已终态记录。不上报则准备
-            # 阶段崩溃后 master 只见 DISPATCHED + runtime_status=NULL，任务永卡 DISPATCHING
-            # 不失败也不补派；RUNNING 未持久化就起用户进程还会被 reconcile 判失败并补派双跑。
+            # P1-17: 必须在起用户进程**之前**持久化 RUNNING。不上报则准备阶段崩溃后
+            # master 只见 DISPATCHED + runtime_status=NULL，任务永卡 DISPATCHING 既不
+            # 失败也不补派；RUNNING 未落库就起进程则会被 reconcile 判失败并补派双跑。
             await self._run_preparation_step(
                 run_id,
                 lambda: self._report_running_start(context, started_at),
             )
 
-            # 生成任务 payload
             payload = self._build_payload(task_msg)
             payload.run_id = run_id
             payload.project_id = context.project_id
 
-            # V1/V1.5/V2: 下载/缓存项目 source bundle
             source_bundle = getattr(task_msg, "source_bundle", None)
             if source_bundle is not None and not self._project_fetcher:
                 raise RuntimeError("source_bundle 任务必须配置 project_fetcher")
@@ -849,17 +778,15 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                         or "",
                     ),
                 )
-                # V5: SpiderPlugin / 其它插件读 workspace_path / project_cwd
+                # 插件读的是 workspace_path / project_cwd 这两个字段。
                 payload.workspace_path = workspace.bundle_root or ""
                 payload.project_cwd = workspace.project_cwd or workspace.bundle_root or ""
 
-            # 准备运行时环境
             runtime_handle = await self._run_preparation_step(run_id, lambda: self._prepare_runtime(context))
 
             if await self._is_cancel_requested(run_id):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
 
-            # 通过插件生成执行计划
             if self._plugin_registry:
                 exec_plan = await self._run_preparation_step(
                     run_id,
@@ -870,12 +797,10 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
 
             self._stamp_plan_scope(exec_plan, payload, run_id)
 
-            # 注入运行时环境变量
             self._apply_runtime_env(exec_plan, context)
 
-            # V11: 把入站 traceparent 透传给子进程,实现 Master → Worker → 子进程
-            # 端到端的 trace_id 连续。子脚本(scrapy/spider/用户代码)读取
-            # TRACEPARENT / ANTCODE_TRACE_ID 即可注入自己的 logger。
+            # 透传给子进程：用户脚本读 TRACEPARENT / ANTCODE_TRACE_ID 就能接上
+            # Master → Worker → 子进程的同一条 trace。
             inbound_traceparent = getattr(task_msg, "traceparent", "") or ""
             if inbound_traceparent:
                 exec_plan.env["TRACEPARENT"] = inbound_traceparent
@@ -885,7 +810,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             if await self._is_cancel_requested(run_id):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
 
-            # 准备日志管理器
             log_sink = None
             if self._log_manager_factory:
                 log_manager = self._log_manager_factory.create(run_id)
@@ -898,7 +822,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             if not await self._state_manager.transition_if_not_cancel_requested(run_id, RunState.RUNNING):
                 return self._build_cancelled_result(run_id, started_at, "任务已取消")
 
-            # 执行
             with execution_egress(self, exec_plan) as execution_plan:
                 exec_result = await execute_with_admission(
                     self,
@@ -930,10 +853,8 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                 error=error,
             )
         finally:
-            # R1-P1-6 (审查报告): 隔离 log_manager.stop 异常。老实现里 LogManager.stop()
-            # → BatchSender.flush() 失败 raise RuntimeError 会替换 try 块的 return 值，被
-            # 外层 _worker_loop 兜底吞掉，结果永不上报也不 ACK，master 侧卡永远 running。
-            # 现在 stop 失败降级为告警，不影响结果上报。
+            # log_manager.stop 的异常必须隔离：finally 里抛出会替换 try 块的返回值，
+            # 被外层 _worker_loop 吞掉，结果永不上报也不 ACK，master 侧卡在 running。
             if log_manager:
                 try:
                     await log_manager.stop()
@@ -945,18 +866,13 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
                     await self._runtime_manager.release(runtime_handle)
                 except Exception:
                     logger.exception(f"释放 runtime handle 失败: run_id={run_id}")
-            # V3: 清理 fetched workspace,避免无限堆积
+            # 清理 fetched workspace，避免无限堆积。
             if self._project_fetcher is not None:
                 try:
                     await self._project_fetcher.cleanup(run_id)
                 except Exception:
                     logger.exception(f"清理 workspace 失败: run_id={run_id}")
-            # R5-P2-6: rule 插件在无 workspace 时会把 rule JSON 写到
-            # `/tmp/antcode-rule/{run_id}/`（plugin.py:_resolve_rule_dir 的
-            # fallback 分支），fetcher.cleanup 只清 workspace 目录管不到这里。
-            # 长跑几天后 /tmp 会堆一堆 rule-*.json 遗骸。这里按约定路径清一
-            # 下——只清 run_id 子目录，不动 `/tmp/antcode-rule/` 根，避免并发
-            # run 相互踩。
+            # fetcher.cleanup 只清 workspace，管不到 rule/spider 的 tmp fallback 目录。
             await self._cleanup_rule_tmp(run_id)
 
     # W1: 二次取消时等 relay 收尾的有界时长（秒）。
@@ -967,12 +883,10 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         try:
             await asyncio.shield(relay_task)
         except asyncio.CancelledError:
-            # W2: shield 期间再次被取消（如 event loop 关停批量 cancel）时，relay_task
-            # 会被 shield 留在后台继续读 spool，而上层 finally 的 _cleanup_rule_tmp 紧接着
-            # rmtree spool 目录，竞态导致数据静默丢失 / 读已删文件。必须先中断 relay 并
-            # 【确保它真正退出】再返回。旧实现只 asyncio.wait(timeout=5)，超时仍 pending
-            # 就 raise，等于把 relay 留给 rmtree 竞态。这里有界地确保 relay 结束；仍不退出
-            # 则跳过本 run 的 rmtree（不变式：_cleanup_rule_tmp 绝不与在读 spool 的 relay 竞态）。
+            # shield 期间再次被取消时，relay_task 会被留在后台继续读 spool，而上层
+            # finally 的 _cleanup_rule_tmp 紧接着 rmtree 同一目录 —— 数据静默丢失。
+            # 所以必须【确保 relay 真正退出】再返回；确保不了就跳过本 run 的 rmtree。
+            # 不变式：_cleanup_rule_tmp 绝不与仍在读 spool 的 relay 并存。
             stopped = await self._stop_relay_bounded(relay_task)
             if not stopped:
                 self._deferred_rule_tmp_cleanup.add(context.run_id)
@@ -988,12 +902,10 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             logger.exception(f"强制取消时 SpiderData relay 失败: run_id={context.run_id}")
 
     async def _stop_relay_bounded(self, relay_task: asyncio.Task) -> bool:
-        """有界地确保 relay_task 结束，返回是否已结束（done）。
+        """有界地确保 relay_task 结束，返回是否已 done。
 
-        保证调用方后续的 _cleanup_rule_tmp(rmtree) 不与仍在读 spool 的 relay
-        竞态：即便本协程在收尾期间再次被取消，也重发取消并继续有界等待，
-        绝不把 relay 留在后台。到达硬性 deadline 仍未 done 时返回 False，由
-        调用方决定跳过 rmtree。
+        即便本协程在收尾期间再次被取消，也重发取消并继续有界等待，绝不把 relay
+        留在后台。到达硬 deadline 仍未 done 则返回 False，由调用方跳过 rmtree。
         """
         relay_task.cancel()
         loop = asyncio.get_running_loop()
@@ -1005,7 +917,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             try:
                 await asyncio.wait({relay_task}, timeout=remaining)
             except asyncio.CancelledError:
-                # 收尾期间本协程又被取消：重发取消并继续有界等待。
                 relay_task.cancel()
         if relay_task.done() and not relay_task.cancelled():
             with contextlib.suppress(Exception):
@@ -1044,12 +955,9 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
     async def _report_running_start(self, context: RunContext, started_at: datetime) -> None:
         """Worker 接单后持久化 RUNNING，失败时禁止启动任务。
 
-        通道:走 transport.report_result 把 status="running" 写到 task:result
-        Stream, master 的 result_loop → task_run_service.update_result 会:
-        - dispatch_status → ACKED (rank 3 覆盖 DISPATCHED rank 2)
-        - runtime_status  → RUNNING (从 NULL 进入 rank 2)
-
-        不 ACK 也不 remove 本地 state；最终终态仍由 _report_result 上报。
+        走 transport.report_result 把 status="running" 写到 task:result Stream；
+        master 侧 update_result 据此把 dispatch_status → ACKED、runtime_status →
+        RUNNING。这里不 ACK 也不 remove 本地 state，终态仍由 _report_result 上报。
         """
         from antcode_worker.transport.base import TaskResult
 
@@ -1167,11 +1075,11 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         return False
 
     async def _cleanup_rule_tmp(self, run_id: str) -> None:
-        """R5-P2-6: rule plugin fallback 路径 `/tmp/antcode-rule/{run_id}/` 兜底清理。
+        """清理 `<tmp>/antcode-rule/{run_id}/` 兜底目录。
 
-        与 rule/plugin.py::_resolve_rule_dir 的兜底约定一致。只删 run_id
-        子目录，不 rm -rf 上层 `/tmp/antcode-rule/`（并发 run 会共享该父
-        目录）。用 to_thread 避免阻塞 event loop。
+        路径约定与 ``rule/plugin.py::_resolve_rule_dir`` 的 fallback 分支、
+        ``spider/plugin.py`` 一致。只删 run_id 子目录，绝不动上层
+        `antcode-rule/` 根——并发 run 共享该父目录。
         """
         if not run_id:
             return
@@ -1196,7 +1104,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         receipt: str | None,
         result: ExecResult,
     ) -> None:
-        """使用最小信息上报结果"""
         context = RunContext(
             run_id=run_id,
             task_id=task_id,
@@ -1211,7 +1118,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         started_at: datetime,
         reason: str,
     ) -> ExecResult:
-        """构建取消结果"""
         return ExecResult(
             run_id=run_id,
             status=RunStatus.CANCELLED,
@@ -1222,7 +1128,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         )
 
     async def _is_cancel_requested(self, run_id: str) -> bool:
-        """判断是否已请求取消"""
         info = await self._state_manager.get(run_id)
         if not info:
             return False
@@ -1246,7 +1151,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         await self._report_result_by_info(run_id=run_id, task_id=task_msg.task_id, receipt=receipt, result=result)
 
     async def cancel(self, run_id: str, reason: str = "") -> bool:
-        """取消任务"""
         request = await self._state_manager.request_cancel(run_id)
         if request is None:
             # FN-01(c): run 尚未到达本地——记 tombstone 并放行 control ACK；
@@ -1268,7 +1172,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         return True
 
     async def _drain_tasks(self) -> None:
-        """等待所有任务完成"""
         while True:
             count = await self._state_manager.count_active()
             if count == 0:
@@ -1276,11 +1179,9 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             await asyncio.sleep(0.5)
 
     async def _force_terminate(self) -> None:
-        """强制终止所有任务"""
         await self.cancel_all(reason="force_terminate")
 
     def get_stats(self) -> dict:
-        """获取统计信息"""
         return {
             "running": self._running,
             "polling": self._polling,
@@ -1291,43 +1192,32 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
     def _generate_run_id(self, task_id: str) -> str:
         return f"run-{task_id}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
 
-    # B2: 跨机 run 归属期（秒）。任务实际执行时长 ≤ TASK_EXECUTION_TIMEOUT，
-    # 归属期 = timeout + 冗余；正常 ack 或结果回传时会 DEL，Redis 侧不会长期占用。
+    # 跨机 run 归属期（秒）= settings.TASK_EXECUTION_TIMEOUT(3600) + 冗余；
+    # 正常 ack 或结果回传时会 DEL，Redis 侧不会长期占用。
     _RUN_OWNERSHIP_TTL_SECONDS = 3600 + 300
-    # P1-GW-02: 600s → 60s + wakeup 事件,把切代窗口从 10 分钟压到 sub-second
+    # 配合 wakeup 事件把切代窗口压到 sub-second，别再调大。
     _RUN_OWNERSHIP_RENEW_INTERVAL_SECONDS = 60
 
     def _resolve_worker_id(self) -> str:
-        """P1-15: 从 transport / config 里解析 worker_id 并缓存。
+        """从 transport / config 里按下面的顺序解析 worker_id 并缓存。
 
-        原实现直接读 ``self._transport.worker_id``——TransportBase 上并没有
-        这个属性,所有 ownership 值退化为 ``"unknown"``,固定 TTL 又不续,
-        Redis 异常还静默放行,等于跨机去重完全失效。
-
-        新实现按顺序尝试:
-
-        1. ``transport.worker_id`` (未来若在基类上补齐 property)
-        2. Redis 直连 transport 的私有 ``_worker_id``
-        3. Gateway transport 的 ``_gateway_config.worker_id``
-        4. ``transport._config.worker_id`` (兜底)
-
-        全部为空则 raise ``RuntimeError``——engine 启动就失败,不再静默
-        用 "unknown" 让跨机去重形同虚设。
+        ``TransportBase`` 上没有公开的 ``worker_id`` 属性，所以要逐个模式试私有
+        字段。解析不到必须 raise：静默兜底成 ``"unknown"`` 会让所有 ownership 键
+        撞在同一个值上，跨机去重形同虚设。
         """
         if self._worker_id_cache:
             return self._worker_id_cache
 
         transport = self._transport
         candidates: list[Any] = []
-        # 1. 公开属性(未来可能在 TransportBase 上补齐)
         candidates.append(getattr(transport, "worker_id", None))
-        # 2. Redis 直连模式: RedisTransport._worker_id
+        # Direct 模式：RedisTransport._worker_id
         candidates.append(getattr(transport, "_worker_id", None))
-        # 3. Gateway 模式: GatewayTransport._gateway_config.worker_id
+        # Gateway 模式：GatewayTransport._gateway_config.worker_id
         gw_config = getattr(transport, "_gateway_config", None)
         if gw_config is not None:
             candidates.append(getattr(gw_config, "worker_id", None))
-        # 4. 通用 ServerConfig fallback
+        # 通用 ServerConfig 兜底
         cfg = getattr(transport, "_config", None)
         if cfg is not None:
             candidates.append(getattr(cfg, "worker_id", None))
@@ -1461,7 +1351,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         return await self._transport.renew_run_ownership(run_id, ttl_ms)
 
     def _build_payload(self, task_msg: TaskMessage) -> Any:
-        """构建任务 payload"""
         from antcode_worker.domain.enums import TaskType
         from antcode_worker.domain.models import TaskPayload
 
@@ -1471,8 +1360,8 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             "spider": TaskType.SPIDER,
             "render": TaskType.RENDER,
             "code": TaskType.CODE,
-            "file": TaskType.CODE,  # 文件项目使用 CODE 插件执行
-            "rule": TaskType.RULE,  # O1: 规则项目走 RulePlugin
+            "file": TaskType.CODE,  # 文件项目复用 CODE 插件执行
+            "rule": TaskType.RULE,
         }.get(project_type, TaskType.CUSTOM)
 
         source_bundle = getattr(task_msg, "source_bundle", None)
@@ -1509,7 +1398,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         )
 
     async def apply_config_update(self, config: dict[str, Any]) -> None:
-        """应用资源配置更新"""
         current = CurrentCapacity(self._max_concurrent, self._policies.resource.memory_limit_mb)
         update = resolve_engine_config_update(config, self._adaptive_limits_provider, current)
         if update.max_concurrent_tasks is not None and update.max_concurrent_tasks != self._max_concurrent:
@@ -1521,27 +1409,13 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         if update.auto_resource_limit is not None:
             self._auto_resource_limit = update.auto_resource_limit
 
-    # P1-26: 缩容 grace period(秒) —— worker 收到 drain 标记后, 最多等
-    # 这么久让在途任务跑完; 超时才走 self.cancel(kill 子进程 + 上报
-    # CANCELLED) 和 hard cancel。300s 大于常见短任务, 又不至于让配置更新
-    # 长期挂起。运维要拉长可以基于 _policies.timeout.execution_timeout
-    # 覆写这个常量。
+    # 缩容 drain 窗口（秒）：300s 大于常见短任务，又不至于让配置更新长期挂起。
     _SHRINK_DRAIN_GRACE_SECONDS = 300.0
-    # hard cancel 前留给 self.cancel 走完 executor.cancel + 上报 CANCELLED
-    # 链路的窗口。
+    # hard cancel 前留给 self.cancel 走完 executor.cancel + 上报 CANCELLED 的窗口。
     _SHRINK_CANCEL_TIMEOUT_SECONDS = 30.0
 
     async def _resize_workers(self, new_max: int) -> None:
-        """动态调整并发 worker 数量
-
-        P1-26: 缩容不再直接 task.cancel()。原实现在 worker 上有在途任务时
-        cancel 会让 ProcessExecutor 的子进程孤儿化(asyncio 只 cancel 读
-        pipe 的协程, 不 kill subprocess),后果:
-        - 旧子进程继续跑 → 产生外部副作用(写库/发消息)但不再上报 / ACK
-        - master 侧 dispatch_status 停在 DISPATCHED 不进终态
-        - PEL reclaim 后新 worker 再次执行同 run_id → 双跑
-        新实现走三段式优雅关闭: drain → 走 cancel 通道 → hard cancel 兜底。
-        """
+        """动态调整并发 worker 数量；缩容走 ``_shrink_workers`` 的三段式关闭。"""
         diff = new_max - self._max_concurrent
         if diff == 0:
             return
@@ -1600,24 +1474,22 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         self._fatal_error_signal.record(RuntimeError(f"后台 worker 缩容失败: {error}"))
 
     async def _shrink_workers(self, draining: list[asyncio.Task]) -> None:
-        """P1-26: 三段式优雅缩容。
+        """三段式优雅缩容。**不能简化成直接 task.cancel()**：asyncio 只 cancel 读
+        pipe 的协程、不 kill subprocess，孤儿子进程会继续写库/发消息却不再上报，
+        master 停在 DISPATCHED，PEL reclaim 后另一台 worker 再跑一遍同 run_id。
 
-        阶段 1 (drain): 把要退的 worker task 塞进 _draining_worker_tasks,
-                        worker 在下一轮起点自然退出;在途任务不受影响,
-                        跑完 + 正常 ACK + 上报终态。
-        阶段 2 (cancel):  超过 grace period 还没退, 找到该 worker 上仍在跑
-                          的 run, 走 self.cancel(run_id) 触发 executor 的
-                          _terminate_process(SIGTERM + grace + SIGKILL),
-                          让 _execute_task 拿到 CANCELLED 结果, 走
-                          _report_result 正常上报终态 + ACK PEL。
-        阶段 3 (force):   还挂着就 task.cancel(), _worker_loop 的
-                          CancelledError 分支兜底 kill + 上报。
+        阶段 1 (drain):  塞进 _draining_worker_tasks，worker 在下一轮起点自然退出，
+                         在途任务跑完 + 正常 ACK + 上报终态。
+        阶段 2 (cancel): 超过 grace period 走 self.cancel(run_id) 触发 executor 的
+                         SIGTERM + grace + SIGKILL，_execute_task 拿到 CANCELLED
+                         结果后正常上报终态 + ACK PEL。
+        阶段 3 (force):  还挂着才 task.cancel()，由 _worker_loop 的 CancelledError
+                         分支兜底 kill + 上报。
         """
         if not draining:
             return
         logger.info(f"P1-26: 优雅缩容 {len(draining)} 个 worker (drain 阶段开始)")
 
-        # 阶段 1: 等待 drain 自然退出
         _, pending = await asyncio.wait(draining, timeout=self._SHRINK_DRAIN_GRACE_SECONDS)
         if not pending:
             for task in draining:
@@ -1628,14 +1500,11 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         logger.warning(
             f"P1-26: {len(pending)} 个 worker drain 超时, 进入 cancel 阶段 (grace={self._SHRINK_DRAIN_GRACE_SECONDS}s)"
         )
-        # 阶段 2: 只取消归属于待退出 worker task 的 run，不能误伤保留
-        # worker 上的在途任务。
+        # 只取消归属于待退出 worker task 的 run，不能误伤保留 worker 上的在途任务。
         failures = await self._cancel_draining_runs(pending)
 
         _, still_pending = await asyncio.wait(pending, timeout=self._SHRINK_CANCEL_TIMEOUT_SECONDS)
         if still_pending:
-            # 阶段 3: hard cancel 兜底。_worker_loop 的 CancelledError 分支
-            # 会做 executor.cancel + _report_result_by_info(CANCELLED)。
             logger.warning(f"P1-26: {len(still_pending)} 个 worker cancel 超时, 强制 cancel")
             for task in still_pending:
                 task.cancel()
@@ -1661,7 +1530,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         return failures
 
     async def _prepare_runtime(self, context: RunContext) -> Any:
-        """准备运行时句柄"""
         runtime_env_name = (context.labels or {}).get("runtime_env_name")
         if runtime_env_name:
             from antcode_worker.domain.models import RuntimeHandle, RuntimeSpec
@@ -1710,7 +1578,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
         exec_plan.workspace_root = payload.workspace_path or None
 
     def _build_fallback_plan(self, context: RunContext, payload: Any, runtime_handle: Any) -> Any:
-        """无插件时的兜底执行计划"""
         from antcode_worker.domain.models import ExecPlan
 
         command = runtime_handle.python_executable
