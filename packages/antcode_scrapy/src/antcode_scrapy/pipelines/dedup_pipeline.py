@@ -26,16 +26,15 @@ Redis key:
 **注意**：本 pipeline **在 AntCodeRedisPipeline 之前**执行（priority 较小），
 命中即 DropItem，Redis stream 不会写入重复项。
 
-**P2-01 修复**：老实现是 ``SISMEMBER`` 判存 + 由 RedisPipeline 在 xadd 成功
-后再 ``SADD`` 提交占位（两阶段），并发同 digest 的两条 item 都过 SISMEMBER
-→ 都写 stream，去重击穿；且 gateway 模式下 sink 没有 ``_redis`` 属性，SADD
-静默失效。修复思路：直接用 ``SADD`` 返回值判存（1 = 新增，0 = 已存在），一
-次原子操作合并"判存 + 占位"；dedup pipeline 自己持有独立 Redis 连接（
-``ANTCODE_SPIDER_DEDUP_REDIS_URL`` / ``ANTCODE_SPIDER_REDIS_URL`` /
-``REDIS_URL`` 顺序回退），gateway 模式也能正常工作。
+用 ``SADD`` 返回值判存（1 = 新增，0 = 已存在），一次原子操作合并"判存 + 占位"，
+避免 check-then-act 竞态。连接自持（不借 sink 的），因为 sink 不含 Redis。
 
-**fail-open 策略**：Redis 连接失败或 SADD 抛异常时**放行 item**（不去重），
-避免 Redis 抖动导致全量 drop。命中 DropItem（真去重）例外，直接抛出。
+**spool 模式不可用**：Rule 子进程的环境白名单（``rule_policy.RULE_PLUGIN_ENV_VARS``）
+不含任何 Redis URL，且沙箱 ``allow_network=False``。该模式下 ``open_spider``
+直接报错——静默跳过会让用户以为去重生效、重复数据却照常入库。
+
+**fail-open 仅限 SADD 运行时异常**：放行该条 item，避免 Redis 抖动导致全量
+drop。命中 DropItem（真去重）例外，直接抛出。配置错误与连接建立失败一律报错。
 """
 
 from __future__ import annotations
@@ -47,6 +46,15 @@ from typing import Any
 
 from loguru import logger
 from scrapy.exceptions import DropItem
+
+
+def _digest_part(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return str(value)
+    # 列表 / dict 等复合类型：JSON 稳定序列化
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 class AntCodeDedupPipeline:
@@ -74,20 +82,19 @@ class AntCodeDedupPipeline:
     async def open_spider(self, spider) -> None:
         """初始化去重配置 + 独立 Redis 连接。
 
-        P2-01: dedup pipeline 需要自己的 Redis 连接（不能借 sink 的），因为
-        gateway 模式下 sink 不含 Redis。env 回退顺序：
-        ``ANTCODE_SPIDER_DEDUP_REDIS_URL`` > ``ANTCODE_SPIDER_REDIS_URL``
-        > ``REDIS_URL``。全都缺 → 去重跳过（不 fail 掉爬取）。
+        env 回退顺序：``ANTCODE_SPIDER_DEDUP_REDIS_URL`` >
+        ``ANTCODE_SPIDER_REDIS_URL`` > ``REDIS_URL``。
         """
         rule = getattr(spider, "rule", {}) or {}
         cfg = rule.get("dedup_config") or {}
         if not cfg.get("enabled"):
             return
 
+        # 以下每一条都是"用户要了去重但我们给不了"。静默跳过会让重复数据照常
+        # 入库且只留一行 warning，用户无从发现；一律报错中止。
         fields = cfg.get("fields") or []
         if not isinstance(fields, list) or not fields:
-            logger.warning("dedup_config.enabled=True 但 fields 为空，去重跳过")
-            return
+            raise RuntimeError("dedup_config.enabled=True 但 fields 为空；请配置参与去重的字段名")
 
         url = (
             os.environ.get("ANTCODE_SPIDER_DEDUP_REDIS_URL", "").strip()
@@ -95,21 +102,15 @@ class AntCodeDedupPipeline:
             or os.environ.get("REDIS_URL", "").strip()
         )
         if not url:
-            logger.warning(
-                "dedup 需要的 Redis URL 未配置 "
+            raise RuntimeError(
+                "dedup_config.enabled=True 但没有可用的 Redis URL "
                 "(ANTCODE_SPIDER_DEDUP_REDIS_URL / ANTCODE_SPIDER_REDIS_URL / "
-                "REDIS_URL 均缺失)，去重跳过"
+                "REDIS_URL 均缺失)。spool 模式不向 Rule 子进程下发 Redis 凭据，"
+                "该模式下请关闭 dedup_config。"
             )
-            return
 
-        try:
-            # T6-T1: 走统一 factory
-            from antcode_core.infrastructure.redis.factory import (
-                create_async_redis_client,
-            )
-        except ImportError as exc:  # pragma: no cover
-            logger.warning(f"antcode_core.infrastructure.redis 不可用，去重跳过: {exc}")
-            return
+        # T6-T1: 走统一 factory
+        from antcode_core.infrastructure.redis.factory import create_async_redis_client
 
         self._fields = [str(f) for f in fields]
         self._scope = str(cfg.get("scope") or "project").lower()
@@ -127,11 +128,7 @@ class AntCodeDedupPipeline:
         self._namespace = os.environ.get("ANTCODE_SPIDER_REDIS_NAMESPACE", "").strip() or "antcode"
         self._project_id = getattr(spider, "project_id", "") or ""
         self._run_id = getattr(spider, "run_id", "") or ""
-        try:
-            self._redis = create_async_redis_client(url, decode_responses=True)
-        except Exception as exc:  # pragma: no cover
-            logger.warning(f"dedup Redis 客户端创建失败，去重跳过: {exc}")
-            return
+        self._redis = create_async_redis_client(url, decode_responses=True)
 
         self._enabled = True
         logger.info(
@@ -155,9 +152,6 @@ class AntCodeDedupPipeline:
             return item
 
         digest = self._compute_digest(item)
-        if not digest:
-            return item
-
         self._checked_count += 1
         key = self._set_key()
 
@@ -208,16 +202,19 @@ class AntCodeDedupPipeline:
         return f"{self._namespace}:spider:dedup:{self._project_id}"
 
     def _compute_digest(self, item: dict[str, Any]) -> str:
-        """按 fields 顺序拼串，sha256 得摘要。字段缺失记空字符串。"""
-        parts: list[str] = []
-        for field in self._fields:
-            value = item.get(field)
-            if value is None:
-                parts.append("")
-            elif isinstance(value, (str, int, float, bool)):
-                parts.append(str(value))
-            else:
-                # 列表 / dict 等复合类型：JSON 稳定序列化
-                parts.append(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        """按 fields 顺序拼串，sha256 得摘要。
+
+        item 的键是各条 extraction_rule 的 ``desc``，而 ``dedup_config.fields``
+        是前端自由输入的标签，两者对不上是常见配置错误。此时每条 item 的
+        摘要都只由空串拼成、完全相同——第一条之后的整批数据会被当成重复
+        全部 DropItem。必须在第一条就报错，不能把它当正常去重跑下去。
+        """
+        if all(item.get(field) is None for field in self._fields):
+            raise ValueError(
+                f"dedup_config.fields={self._fields} 在 item 中一个都不存在"
+                f"（item 实际字段: {sorted(item)}）。fields 必须与 extraction_rules "
+                f"的 desc 一致，否则所有 item 摘要相同、会被整批丢弃。"
+            )
+        parts = [_digest_part(item.get(field)) for field in self._fields]
         raw = "\x1f".join(parts)  # ASCII US 分隔符，避免与内容冲突
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()

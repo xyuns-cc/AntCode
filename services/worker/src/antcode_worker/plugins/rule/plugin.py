@@ -131,6 +131,14 @@ class RulePlugin(PluginBase):
             errors.append("proxy_config 必须是对象")
         elif proxy_config and proxy_config.get("enabled"):
             errors.append("安全 spool 模式暂不支持 proxy_config：拒绝把代理凭据交给子进程")
+        # RULE_PLUGIN_ENV_VARS 不含任何 Redis URL 且沙箱 allow_network=False，
+        # 子进程里的 AntCodeDedupPipeline 必然连不上 Redis。不在这里拦住的话，
+        # 用户在表单上打开的去重会一声不响地不生效，重复数据照常入库。
+        dedup_config = rule.get("dedup_config")
+        if dedup_config is not None and not isinstance(dedup_config, dict):
+            errors.append("dedup_config 必须是对象")
+        elif dedup_config and dedup_config.get("enabled"):
+            errors.append("安全 spool 模式暂不支持 dedup_config：子进程没有 Redis 凭据，去重无法生效")
         return errors
 
     def _get_python_executable(self, context: RunContext) -> str:

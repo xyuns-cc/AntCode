@@ -161,9 +161,6 @@ class AntCodeRedisPipeline:
         self._sequence += 1
         payload_dict = dict(item)
         url = str(payload_dict.pop("_url", "") or "")
-        # R1-P1-10: AntCodeDedupPipeline 挂的延迟提交信息，不进 data 字段
-        dedup_commit = payload_dict.pop("_antcode_dedup", None)
-
         data_json = json.dumps(payload_dict, ensure_ascii=False)
         item_id = str(uuid.uuid4())
         timestamp = datetime.now().isoformat()
@@ -178,32 +175,19 @@ class AntCodeRedisPipeline:
         )
         ok, n_written = self._normalize_write_result(raw)
         if ok:
-            await self._handle_write_success(
-                spider=spider,
-                written=n_written,
-                timestamp=timestamp,
-                dedup_commit=dedup_commit,
-            )
+            await self._handle_write_success(spider=spider, written=n_written, timestamp=timestamp)
         else:
             self._handle_write_failure(spider)
 
         return item
 
-    async def _handle_write_success(
-        self,
-        *,
-        spider: Any,
-        written: int,
-        timestamp: str,
-        dedup_commit: Any,
-    ) -> None:
+    async def _handle_write_success(self, *, spider: Any, written: int, timestamp: str) -> None:
         if written > 0:
             spider.crawler.stats.inc_value(
                 "antcode/redis_items_written",
                 count=written,
             )
         await self._write_heartbeat(timestamp)
-        await self._commit_dedup(dedup_commit)
 
     async def _write_heartbeat(self, timestamp: str) -> None:
         if self._heartbeat_interval <= 0:
@@ -218,21 +202,6 @@ class AntCodeRedisPipeline:
                 "last_item_at": timestamp,
             }
         )
-
-    async def _commit_dedup(self, dedup_commit: Any) -> None:
-        if not isinstance(dedup_commit, dict):
-            return
-        redis = getattr(self._sink, "_redis", None)
-        if redis is None:
-            return
-        key = str(dedup_commit.get("key", ""))
-        digest = str(dedup_commit.get("digest", ""))
-        if not key or not digest:
-            return
-        added = await redis.sadd(key, digest)
-        ttl = int(dedup_commit.get("ttl_seconds", 0) or 0)
-        if ttl and added:
-            await redis.expire(key, ttl)
 
     def _handle_write_failure(self, spider: Any) -> None:
         self._xadd_fail_count += 1
@@ -254,14 +223,12 @@ class AntCodeRedisPipeline:
         if self._started_at:
             elapsed_ms = (datetime.now() - self._started_at).total_seconds() * 1000
 
-        # P1-27: 决定 final meta 里发的 status——因为 close() 里会把 status
-        # 一并发出去，我们先按当前已知信息给出乐观判定；close 完再核对，
-        # 若 close 报告失败/有 remaining 就补记 xadd_failed，CLI 靠它判 exit code。
-        pre_written = int(stats.get_value("antcode/redis_items_written", 0))
-        if xadd_failed_pre > 0 or (items > 0 and pre_written == 0 and items > 0):
-            optimistic_status = "failed"
-        else:
-            optimistic_status = "completed"
+        # close() 会把 status 一并发出去，所以只能用此刻已确知的失败来判定。
+        # 不能再拿 "written == 0" 补判：gateway sink 按批 flush，最后一批的
+        # ack 正是由下面这次 close() 产生的，此刻 written=0 是正常状态——
+        # 那会把所有不足一个批次的成功 run 误报成 failed。close 之后才暴露
+        # 的失败由 final_flush_failed 记录，CLI 靠它判退出码。
+        optimistic_status = "failed" if xadd_failed_pre > 0 else "completed"
 
         close_ok = True
         remaining = 0

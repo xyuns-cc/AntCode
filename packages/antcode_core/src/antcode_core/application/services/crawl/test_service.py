@@ -351,14 +351,11 @@ class CrawlTestService(BaseService):
         from tortoise import Tortoise
 
         from antcode_core.domain.models.enums import TaskStatus
+        from antcode_core.domain.models.task_status_sets import TASK_RUN_TERMINAL_STATUSES
 
-        run_terminal = {
-            TaskStatus.SUCCESS,
-            TaskStatus.FAILED,
-            TaskStatus.TIMEOUT,
-            TaskStatus.CANCELLED,
-            TaskStatus.REJECTED,
-        }
+        # 别在这里手抄一份终态集：漏掉 SKIPPED 时已结算的批次永远不满足
+        # all_terminal，只能空转到超时并报成"测试执行超时"。
+        run_terminal = TASK_RUN_TERMINAL_STATUSES
 
         result = CrawlTestResult(batch_id=batch_id)
         start_time = time.time()

@@ -9,10 +9,6 @@
    Scrapy Selector 抽取，一页产出一条 dict 交给 pipeline。
 3. ``_next_request`` / ``_infer_pagination_method`` / ``_build_page_url`` —
    next_page_rule（CSS/XPath）或页码占位符驱动分页，受 ``max_pages`` 限。
-
-**契约兼容点**：抽取表达式（css/xpath/regex）语法与旧 spiderkit 完全
-一致，因为 spiderkit 的 Selector 本就是仿 Scrapy 的 parsel；前端已保存的
-规则零改动。
 """
 
 from __future__ import annotations
@@ -43,6 +39,44 @@ def _xpath_string_literal(s: str) -> str:
         if part:
             concat_parts.append(f'"{part}"')
     return f"concat({', '.join(concat_parts)})"
+
+
+DEFAULT_SCROLL_COUNT = 5
+DEFAULT_SCROLL_WAIT_MS = 800
+_MAX_REGEX_EXPR_LEN = 512
+# 嵌套量词的启发式：(...)+ / (...)* 里面又含 + 或 *
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*]")
+
+
+def _page_method(name: str, *args: Any):
+    """构造 scrapy-playwright PageMethod。
+
+    只有 settings.py 已把 engine 提升为 playwright 时才走到这里，缺依赖就是
+    环境装错了：吞掉 ImportError 会让翻页整段消失、只抓到第一页却报成功。
+    """
+    from scrapy_playwright.page import PageMethod
+
+    return PageMethod(name, *args)
+
+
+def _extract_values(response, rule_type: str, expr: str) -> list:
+    if rule_type == "css":
+        return response.css(expr).getall()
+    if rule_type == "xpath":
+        return response.xpath(expr).getall()
+    if rule_type in ("regex", "re"):
+        return _extract_regex(response, expr)
+    raise ValueError(f"不支持的规则类型: {rule_type}")
+
+
+def _extract_regex(response, expr: str) -> list:
+    """R1-P2-11: ReDoS 兜底。彻底的方案是带超时的正则引擎（regex / re2），
+    一期先在规则层拦截，避免恶意规则拖挂 worker。"""
+    if len(expr) > _MAX_REGEX_EXPR_LEN:
+        raise ValueError(f"regex 规则过长（{len(expr)} > {_MAX_REGEX_EXPR_LEN}），拒绝执行")
+    if _NESTED_QUANTIFIER_RE.search(expr):
+        raise ValueError("regex 含嵌套量词，可能触发 catastrophic backtracking，拒绝执行")
+    return re.findall(expr, response.text)
 
 
 class UniversalRuleSpider(scrapy.Spider):
@@ -101,11 +135,8 @@ class UniversalRuleSpider(scrapy.Spider):
         click_element / infinite_scroll 只发第一页，靠 parse 拉下一页。
         """
         method = self.pagination_method
-        # R1-P2-18 (审查报告): url_pattern 但模板无占位符时，老实现会
-        # yield max_pages 个**完全相同**的 URL。默认 dont_filter=False 时
-        # 被 Scrapy 内置 dupefilter 过滤成静默单页（用户以为拿到 max_pages
-        # 页却只有一页）；用户设了 dont_filter=true 时更糟，真正重复请求
-        # max_pages 次浪费带宽。在启动时校验模板必须含占位符。
+        # url_pattern 但模板无占位符时会 yield max_pages 个完全相同的 URL：
+        # dupefilter 过滤成静默单页，或（dont_filter=true）真重复请求 N 次。
         if method == "url_pattern":
             template = str(self.pagination_cfg.get("url_template") or self.rule.get("target_url") or "")
             if not self._PAGE_PLACEHOLDER_RE.search(template):
@@ -147,12 +178,7 @@ class UniversalRuleSpider(scrapy.Spider):
                 meta["playwright_page_methods"] = page_methods
         # js_click 场景：初始加载时先等 DOM 稳定，click 逻辑在 parse 里做
         if need_page_obj and self.pagination_method == "js_click":
-            try:
-                from scrapy_playwright.page import PageMethod
-
-                meta["playwright_page_methods"] = [PageMethod("wait_for_load_state", "networkidle")]
-            except ImportError:
-                pass
+            meta["playwright_page_methods"] = [_page_method("wait_for_load_state", "networkidle")]
 
         # cookies: rule.cookies 可以是 dict 或 list-of-dict，Scrapy 都支持
         return scrapy.Request(
@@ -167,17 +193,12 @@ class UniversalRuleSpider(scrapy.Spider):
 
     def _build_scroll_methods(self) -> list:
         """infinite_scroll: 让 Playwright 页面加载后滚动若干次触发 AJAX 加载。"""
-        try:
-            from scrapy_playwright.page import PageMethod
-        except ImportError:
-            self.logger.warning("scrapy_playwright 不可用，infinite_scroll 跳过")
-            return []
-        scroll_count = int(self.pagination_cfg.get("scroll_count") or 5)
-        wait_ms = int(self.pagination_cfg.get("scroll_wait_ms") or 800)
-        methods = [PageMethod("wait_for_load_state", "networkidle")]
+        scroll_count = int(self.pagination_cfg.get("scroll_count") or DEFAULT_SCROLL_COUNT)
+        wait_ms = int(self.pagination_cfg.get("scroll_wait_ms") or DEFAULT_SCROLL_WAIT_MS)
+        methods = [_page_method("wait_for_load_state", "networkidle")]
         for _ in range(scroll_count):
-            methods.append(PageMethod("evaluate", "window.scrollTo(0, document.body.scrollHeight)"))
-            methods.append(PageMethod("wait_for_timeout", wait_ms))
+            methods.append(_page_method("evaluate", "window.scrollTo(0, document.body.scrollHeight)"))
+            methods.append(_page_method("wait_for_timeout", wait_ms))
         return methods
 
     # ------------------------------------------------------------------
@@ -276,34 +297,20 @@ class UniversalRuleSpider(scrapy.Spider):
         return True
 
     def _apply_rule(self, response, rule: dict[str, Any]) -> Any:
-        """一条规则：type=css/xpath/regex；单值返元素，多值返 list。"""
+        """一条规则：type=css/xpath/regex；单值返元素，多值返 list。
+
+        只有"表达式合法但没匹配到"才返回 None。表达式非法 / 类型不支持 /
+        正则被安全策略拒绝一律抛出：这些都是规则配置错误，静默返回 None 会
+        让整个 run 以"成功但字段全空"收场，用户无从知道是哪条规则写错了。
+        """
         rule_type = str(rule.get("type") or "css").lower()
-        expr = rule.get("expr") or ""
+        expr = str(rule.get("expr") or "")
         if not expr:
-            return None
+            raise ValueError(f"抽取规则表达式为空: desc={rule.get('desc')} type={rule_type}")
         try:
-            if rule_type == "css":
-                values = response.css(expr).getall()
-            elif rule_type == "xpath":
-                values = response.xpath(expr).getall()
-            elif rule_type in ("regex", "re"):
-                # R1-P2-11: 简单 ReDoS 兜底——超长表达式或嵌套量词直接拒绝。
-                # 更彻底的方案是用支持超时的正则引擎（如 regex 库或 re2），
-                # 一期先做规则层拦截，避免恶意规则拖挂 worker。
-                if len(expr) > 512:
-                    self.logger.warning(f"regex 规则过长（{len(expr)}> 512）拒绝执行 desc={rule.get('desc')}")
-                    return None
-                # 嵌套量词的启发式：(...)+... 或 (...)*... 里面又含 + 或 *
-                if re.search(r"\([^)]*[+*][^)]*\)[+*]", expr):
-                    self.logger.warning(f"regex 可能存在 catastrophic backtracking 拒绝执行: {expr!r}")
-                    return None
-                text = response.text if hasattr(response, "text") else ""
-                values = re.findall(expr, text)
-            else:
-                raise ValueError(f"不支持的规则类型: {rule_type}")
+            values = _extract_values(response, rule_type, expr)
         except Exception as exc:
-            self.logger.warning(f"抽取失败 desc={rule.get('desc')} expr={expr!r}: {exc}")
-            return None
+            raise ValueError(f"抽取规则执行失败: desc={rule.get('desc')} type={rule_type} expr={expr!r}") from exc
         if not values:
             return None
         return values if len(values) > 1 else values[0]
@@ -332,10 +339,6 @@ class UniversalRuleSpider(scrapy.Spider):
             elif sel_type == "text":
                 # HTTP 模式下没有原生 text engine，用 XPath 拼一下
                 # 例：expr="Next" → //a[contains(normalize-space(.), "Next")]/@href
-                # R1-P2-11 (审查报告): 老实现 ``expr.replace('"','\\"')`` 是
-                # 错的——XPath 字符串字面量不支持 \\" 转义，含双引号的 expr
-                # 直接抛 ValueError 被 except 吞掉，翻页静默终止。正确做法：
-                # 若含双引号则用单引号包，两者都含则用 XPath concat() 拼。
                 target = _xpath_string_literal(expr)
                 target = f"//a[contains(normalize-space(.), {target})]/@href"
                 href = response.xpath(target).get()
@@ -430,11 +433,8 @@ class UniversalRuleSpider(scrapy.Spider):
         占位符处理（url_pattern）：
         - ``{}``          → 直接替换第一次出现（保留 str.format 风格）
         - ``{page}`` / ``{page_number}`` → 命名占位符
-        - ``{N}``         → 数字占位符（N 是初始页号，抓取时按 page 递增替换）
-
-        对于 ``{N}``，无论前后有无路径分隔符都能命中——``page/{1}/`` 变
-        ``page/1/`` `page/2/` ...；``page{1}`` 变 ``page1`` `page2` ...；
-        ``list?p={0}`` 变 ``list?p=0`` `list?p=1` ... （0-indexed 也 OK）。
+        - ``{N}``         → 数字占位符（N 是初始页号，抓取时按 page 递增替换），
+          无需路径分隔符：``page/{1}/`` → ``page/1/``，``list?p={0}`` → ``list?p=0``
         """
         if self.pagination_method == "url_pattern":
             template = str(self.pagination_cfg.get("url_template") or self.rule.get("target_url") or "")
