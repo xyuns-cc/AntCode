@@ -23,7 +23,6 @@ from antcode_core.application.services.crawl.progress_service import (
     CrawlProgressService,
     crawl_progress_service,
 )
-from antcode_core.application.services.crawl.queue_service import CrawlQueueService, crawl_queue_service
 from antcode_core.common.exceptions import BatchNotFoundError, BatchStateError
 from antcode_core.common.serialization import from_json, to_json
 from antcode_core.domain.models.crawl import BatchStatus, CrawlBatch
@@ -155,7 +154,6 @@ class CrawlTestService(BaseService):
     def __init__(
         self,
         batch_service: CrawlBatchService | None = None,
-        queue_service: CrawlQueueService | None = None,
         progress_service: CrawlProgressService | None = None,
         dedup_service: CrawlDedupService | None = None,
     ):
@@ -163,13 +161,11 @@ class CrawlTestService(BaseService):
 
         Args:
             batch_service: 批次管理服务，为 None 时使用全局实例
-            queue_service: 队列服务，为 None 时使用全局实例
             progress_service: 进度服务，为 None 时使用全局实例
             dedup_service: 去重服务，为 None 时使用全局实例
         """
         super().__init__()
         self._batch_service = batch_service or crawl_batch_service
-        self._queue_service = queue_service or crawl_queue_service
         self._progress_service = progress_service or crawl_progress_service
         self._dedup_service = dedup_service or crawl_dedup_service
 

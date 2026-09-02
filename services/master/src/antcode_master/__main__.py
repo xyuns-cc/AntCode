@@ -39,7 +39,6 @@ from antcode_master.control.retry_loop import retry_service
 from antcode_master.control.scheduler_event_loop import scheduler_event_loop
 from antcode_master.control.scheduler_loop import scheduler_service
 from antcode_master.control.worker_eviction import configure_lease_store, on_worker_evicted
-from antcode_master.ingester.alert_check_loop import alert_check_loop
 from antcode_master.ingester.artifact_cleanup_loop import artifact_cleanup_loop
 from antcode_master.ingester.crawl_batch_status_loop import crawl_batch_status_loop
 from antcode_master.ingester.log_ingest_loop import log_ingest_loop
@@ -99,7 +98,6 @@ async def _start_ingester_group() -> None:
         log_ingest_loop.start(),
         artifact_cleanup_loop.start(),
         crawl_batch_status_loop.start(),
-        alert_check_loop.start(),
         worker_registration_cleanup_loop.start(),
     )
     logger.info("[ingester] 数据面 loop 组已就绪")
@@ -210,7 +208,6 @@ async def _stop_ingester_group() -> None:
         log_ingest_loop.stop(),
         artifact_cleanup_loop.stop(),
         crawl_batch_status_loop.stop(),
-        alert_check_loop.stop(),
         worker_registration_cleanup_loop.stop(),
         return_exceptions=True,
     )

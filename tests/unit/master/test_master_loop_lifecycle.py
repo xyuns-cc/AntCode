@@ -6,7 +6,6 @@ import pytest
 from antcode_master.control.lease_sweeper_loop import LeaseSweeperLoop
 from antcode_master.control.reconcile_loop import ReconcileLoop
 from antcode_master.control.redispatch_loop import RedispatchLoop
-from antcode_master.ingester.alert_check_loop import AlertCheckLoop
 from antcode_master.ingester.artifact_cleanup_loop import ArtifactCleanupLoop
 from antcode_master.ingester.crawl_batch_status_loop import CrawlBatchStatusLoop
 from antcode_master.ingester.worker_registration_cleanup_loop import WorkerRegistrationCleanupLoop
@@ -37,10 +36,6 @@ CASES = [
     _LoopCase(
         "antcode_master.control.redispatch_loop",
         lambda: RedispatchLoop(tick_interval_seconds=60),
-    ),
-    _LoopCase(
-        "antcode_master.ingester.alert_check_loop",
-        lambda: AlertCheckLoop(poll_interval_seconds=60),
     ),
     _LoopCase(
         "antcode_master.ingester.artifact_cleanup_loop",

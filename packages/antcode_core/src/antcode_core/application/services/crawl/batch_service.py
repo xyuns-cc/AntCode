@@ -18,7 +18,6 @@ from antcode_core.application.services.crawl.progress_service import (
     CrawlProgressService,
     crawl_progress_service,
 )
-from antcode_core.application.services.crawl.queue_service import CrawlQueueService, crawl_queue_service
 from antcode_core.application.services.scheduler.outbox_service import (
     scheduler_outbox_service,
 )
@@ -58,19 +57,16 @@ class CrawlBatchService(BaseService):
 
     def __init__(
         self,
-        queue_service: CrawlQueueService | None = None,
         progress_service: CrawlProgressService | None = None,
         dedup_service: CrawlDedupService | None = None,
     ):
         """初始化批次管理服务
 
         Args:
-            queue_service: 队列服务，为 None 时使用全局实例
             progress_service: 进度服务，为 None 时使用全局实例
             dedup_service: 去重服务，为 None 时使用全局实例
         """
         super().__init__()
-        self._queue_service = queue_service or crawl_queue_service
         self._progress_service = progress_service or crawl_progress_service
         self._dedup_service = dedup_service or crawl_dedup_service
 

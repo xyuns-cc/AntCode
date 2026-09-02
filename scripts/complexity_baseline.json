@@ -116,12 +116,6 @@
       "value": 4
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/base.py",
-      "function": "CrawlQueueBackend.dequeue",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/progress_backend.py",
       "function": "ProgressStore.increment_progress",
       "rule": "POSITIONAL_ARGS",
@@ -146,12 +140,6 @@
       "value": 4
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/backends/redis_queue.py",
-      "function": "RedisCrawlQueueBackend.dequeue",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_dispatcher_service.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -167,7 +155,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 698
+      "value": 694
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_service.py",
@@ -182,24 +170,6 @@
       "value": 6
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/metrics_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 608
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/metrics_service.py",
-      "function": "CrawlMetricsService.collect_batch_metrics",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/metrics_service.py",
-      "function": "CrawlMetricsService.update_alert_config",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/progress_service.py",
       "function": "CrawlProgressService.__init__",
       "rule": "POSITIONAL_ARGS",
@@ -212,30 +182,6 @@
       "value": 5
     },
     {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 851
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
-      "function": "CrawlQueueService.enqueue_url",
-      "rule": "POSITIONAL_ARGS",
-      "value": 9
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
-      "function": "CrawlQueueService.enqueue_urls",
-      "rule": "POSITIONAL_ARGS",
-      "value": 9
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/queue_service.py",
-      "function": "CrawlQueueService.fetch_tasks",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
-    },
-    {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
       "function": "-",
       "rule": "FILE_LINES",
@@ -246,12 +192,6 @@
       "function": "CrawlTestConfig.validate",
       "rule": "PLR2004",
       "value": 5
-    },
-    {
-      "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
-      "function": "CrawlTestService.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 4
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
@@ -1073,19 +1013,13 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1042
+      "value": 731
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
       "function": "list_batches",
       "rule": "POSITIONAL_ARGS",
       "value": 6
-    },
-    {
-      "path": "services/web_api/src/antcode_web_api/routes/v1/crawl.py",
-      "function": "update_alert_config",
-      "rule": "POSITIONAL_ARGS",
-      "value": 5
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/logs.py",
@@ -2520,18 +2454,6 @@
       "function": "test_dispatch_maps_batch_limits_without_reusing_request_timeout",
       "rule": "PLR2004",
       "value": 3
-    },
-    {
-      "path": "tests/unit/core/test_crawl_takeover_recovery.py",
-      "function": "test_pending_parsers_support_current_redis_dict_shape",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
-      "path": "tests/unit/core/test_crawl_takeover_recovery.py",
-      "function": "test_takeover_recovery_exposes_partial_failures_after_other_work",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "tests/unit/core/test_db_optimizer.py",

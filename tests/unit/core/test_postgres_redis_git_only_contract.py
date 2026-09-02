@@ -2,7 +2,6 @@ import inspect
 from pathlib import Path
 
 import pytest
-from antcode_core.application.services.crawl.backends import base as crawl_queue_backend
 from antcode_core.application.services.crawl.backends import dedup_backend, progress_backend
 from antcode_core.domain.schemas.project import (
     FileInfo,
@@ -18,13 +17,6 @@ from antcode_core.domain.schemas.project_unified import UnifiedProjectUpdateRequ
 from antcode_core.infrastructure.cache.cache import CacheConfig
 
 REPO_ROOT = Path(__file__).parents[3]
-
-
-def test_crawl_memory_queue_backend_is_rejected(monkeypatch):
-    monkeypatch.setenv("CRAWL_BACKEND", "memory")
-    crawl_queue_backend.reset_queue_backend()
-    with pytest.raises(ValueError, match="Redis"):
-        crawl_queue_backend.get_queue_backend()
 
 
 def test_crawl_state_backends_reject_process_memory(monkeypatch):

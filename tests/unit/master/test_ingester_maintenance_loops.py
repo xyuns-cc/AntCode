@@ -4,11 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 from antcode_core.domain.models.enums import BatchStatus
-from antcode_master.ingester.alert_check_loop import AlertCheckLoop
 from antcode_master.ingester.artifact_cleanup_loop import ArtifactCleanupLoop
 from antcode_master.ingester.crawl_batch_status_loop import CrawlBatchStatusLoop
 
-alert_module = importlib.import_module("antcode_master.ingester.alert_check_loop")
 artifact_module = importlib.import_module("antcode_master.ingester.artifact_cleanup_loop")
 batch_module = importlib.import_module("antcode_master.ingester.crawl_batch_status_loop")
 project_module = importlib.import_module("antcode_core.domain.models.project")
@@ -117,45 +115,6 @@ def _batch(*, seed_count=2):
         status=BatchStatus.RUNNING.value,
         completed_at=None,
     )
-
-
-@pytest.mark.asyncio
-async def test_alert_tick_deduplicates_projects_and_continues_after_failure(monkeypatch):
-    batches = [SimpleNamespace(project_id=value) for value in (1, 1, 2, 3)]
-    projects = [SimpleNamespace(id=1, public_id="p-1"), SimpleNamespace(id=2, public_id="p-2")]
-    metrics = _Metrics(failing="p-1")
-    alert_batches = type("AlertBatches", (_Model,), {"rows": batches, "filters": []})
-    alert_projects = type("AlertProjects", (_Model,), {"rows": projects, "filters": []})
-    monkeypatch.setattr(alert_module, "CrawlBatch", alert_batches)
-    monkeypatch.setattr(project_module, "Project", alert_projects)
-    monkeypatch.setattr(alert_module, "crawl_metrics_service", metrics)
-
-    await AlertCheckLoop()._tick()
-
-    assert metrics.checked == ["p-1", "p-2"]
-    assert alert_batches.filters[0]["status__in"] == ["running", "paused"]
-
-
-@pytest.mark.asyncio
-async def test_alert_attempt_limit_holds_when_every_dependency_call_fails(monkeypatch):
-    batches = [SimpleNamespace(project_id=index) for index in range(1, 503)]
-    projects = [SimpleNamespace(id=index, public_id=f"p-{index}") for index in range(1, 503)]
-    metrics = _Metrics()
-
-    async def always_fail(project_id):
-        metrics.checked.append(project_id)
-        raise RuntimeError("metrics unavailable")
-
-    metrics.check_alerts = always_fail
-    batch_model = type("LimitBatches", (_Model,), {"rows": batches, "filters": []})
-    project_model = type("LimitProjects", (_Model,), {"rows": projects, "filters": []})
-    monkeypatch.setattr(alert_module, "CrawlBatch", batch_model)
-    monkeypatch.setattr(project_module, "Project", project_model)
-    monkeypatch.setattr(alert_module, "crawl_metrics_service", metrics)
-
-    await AlertCheckLoop()._tick()
-
-    assert len(metrics.checked) == alert_module.MAX_PROJECTS_PER_TICK
 
 
 @pytest.mark.asyncio

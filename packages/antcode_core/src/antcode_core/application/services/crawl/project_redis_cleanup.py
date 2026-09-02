@@ -7,7 +7,6 @@ from typing import Any
 
 from antcode_core.application.services.crawl.backends import redis_keys
 from antcode_core.application.services.crawl.backends.redis_progress import RedisProgressStore
-from antcode_core.domain.models.enums import Priority
 from antcode_core.infrastructure.redis.client import get_redis_client
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
 
@@ -74,15 +73,7 @@ class CrawlProjectRedisCleanup:
         return self._redis
 
     def _project_keys(self, project_id: str) -> tuple[str, ...]:
-        streams = tuple(
-            redis_keys.crawl_stream_key(project_id, priority, self._namespace)
-            for priority in [Priority.HIGH, Priority.NORMAL, Priority.LOW]
-        )
-        return (
-            *streams,
-            redis_keys.crawl_dead_letter_key(project_id, self._namespace),
-            redis_keys.crawl_dedup_key(project_id, self._namespace),
-        )
+        return (redis_keys.crawl_dedup_key(project_id, self._namespace),)
 
     async def _verify(
         self,

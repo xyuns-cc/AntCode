@@ -10,17 +10,13 @@
 ``streams.py`` 现已整体删除（合并期的纯别名模块也一并清掉），本文件断言
 该模块不可再被导入，防止第二份实现以任何形式复活。
 
-本文件用注入的假 Redis 驱动真实的 ``StreamClient`` 与真实调用方（Crawl
-队列后端、Master 调度事件循环），不 mock 被测类本身。
+本文件用注入的假 Redis 驱动真实的 ``StreamClient`` 与真实调用方（Master
+调度事件循环），不 mock 被测类本身。
 """
 
 import importlib.util
 
 import pytest
-from antcode_core.application.services.crawl.backends.redis_queue import (
-    DEFAULT_CONSUMER_GROUP,
-    RedisCrawlQueueBackend,
-)
 from antcode_core.common.config import settings
 from antcode_core.infrastructure.redis import StreamClient as PackageStreamClient
 from antcode_core.infrastructure.redis.stream_client import StreamClient
@@ -30,7 +26,6 @@ from loguru import logger
 TEST_GROUP = "explicit-test-group"
 TEST_STREAM = "antcode:test:stream"
 TWO_MESSAGES = 2
-CRAWL_PRIORITY_LEVELS = 3
 
 
 class _RecordingRedis:
@@ -165,33 +160,6 @@ async def test_explicit_group_reaches_redis_verbatim():
 # ---------------------------------------------------------------------------
 # 调用方组名防回归：合并前后必须一致
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_crawl_backend_still_uses_crawl_workers_group():
-    """Crawl 队列后端合并前后都必须用 ``crawl_workers``。"""
-    assert DEFAULT_CONSUMER_GROUP == "crawl_workers"
-    redis = _RecordingRedis()
-    backend = RedisCrawlQueueBackend(stream_client=StreamClient(redis))
-
-    await backend.dequeue("project-1", "consumer-1", count=1)
-
-    assert redis.read_groups == [DEFAULT_CONSUMER_GROUP] * CRAWL_PRIORITY_LEVELS
-    # ensure_active_group 走 Lua：KEYS=(stream, fence)，ARGV[1]=组名
-    assert all(call[-1] == DEFAULT_CONSUMER_GROUP for call in redis.eval_calls)
-
-
-@pytest.mark.asyncio
-async def test_crawl_backend_ack_uses_crawl_workers_group():
-    redis = _RecordingRedis()
-    backend = RedisCrawlQueueBackend(stream_client=StreamClient(redis))
-
-    await backend.ack("project-1", ["1-0"], 5)
-
-    # xack_delete 走 Lua：KEYS=(stream,)，ARGV[1]=组名，其后是 msg_ids
-    ack_delete_call = redis.eval_calls[-1]
-    assert ack_delete_call[0] == 1
-    assert ack_delete_call[2] == DEFAULT_CONSUMER_GROUP
 
 
 @pytest.mark.asyncio

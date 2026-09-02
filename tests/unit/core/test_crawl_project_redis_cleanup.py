@@ -6,7 +6,7 @@ from antcode_core.application.services.crawl.project_redis_cleanup import (
     CrawlProjectRedisCleanup,
 )
 
-PROJECT_QUEUE_KEY_COUNT = 5
+PROJECT_KEY_COUNT = 1
 
 
 class _CleanupRedis:
@@ -42,10 +42,6 @@ class _CleanupRedis:
 def _seed(redis: _CleanupRedis) -> None:
     redis.keys.update(
         {
-            "{tenant:crawl:project-1}:stream:0",
-            "{tenant:crawl:project-1}:stream:5",
-            "{tenant:crawl:project-1}:stream:9",
-            "{tenant:crawl:project-1}:dead-letter",
             "{tenant:crawl:project-1}:dedup",
             "{tenant:crawl:project-1:batch-1}:progress",
             "{tenant:crawl:project-1:batch-1}:checkpoint",
@@ -55,7 +51,7 @@ def _seed(redis: _CleanupRedis) -> None:
 
 
 @pytest.mark.asyncio
-async def test_project_cleanup_deletes_queue_state_and_retains_batch_fence() -> None:
+async def test_project_cleanup_deletes_dedup_state_and_retains_batch_fence() -> None:
     redis = _CleanupRedis()
     _seed(redis)
     cleanup = CrawlProjectRedisCleanup(redis, namespace="tenant")
@@ -63,7 +59,7 @@ async def test_project_cleanup_deletes_queue_state_and_retains_batch_fence() -> 
 
     report = await cleanup.cleanup(request)
 
-    assert report.project_keys_deleted == PROJECT_QUEUE_KEY_COUNT
+    assert report.project_keys_deleted == PROJECT_KEY_COUNT
     assert report.project_fence_retained is True
     assert report.cancel_fences_retained == 1
     assert redis.keys == {
@@ -82,7 +78,7 @@ async def test_project_cleanup_is_idempotent() -> None:
     first = await cleanup.cleanup(request)
     second = await cleanup.cleanup(request)
 
-    assert first.project_keys_deleted == PROJECT_QUEUE_KEY_COUNT
+    assert first.project_keys_deleted == PROJECT_KEY_COUNT
     assert second.project_keys_deleted == 0
     assert second.cancel_fences_retained == 1
 
