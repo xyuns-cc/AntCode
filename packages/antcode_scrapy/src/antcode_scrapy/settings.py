@@ -3,7 +3,7 @@
 分层：
 - 基础设置（并发、超时、日志、pipeline 注册）永远启用
 - engine=playwright/render → 装 scrapy-playwright DownloadHandler + asyncio reactor
-- engine=curl_cffi → 装 scrapy-impersonate（保留旧 spiderkit 的指纹能力）
+- engine=curl_cffi → 装 scrapy-impersonate（TLS/JA3 指纹伪装）
 
 安全 spool 模式不向子进程下发 Redis 凭据，因此依赖 Redis 的跨 Worker resume
 与动态代理池会显式拒绝；legacy 模式仍支持 scrapy-redis resume 和固定代理。

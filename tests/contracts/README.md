@@ -1,13 +1,12 @@
 # Worker TransportBase 共享契约测试
 
-本目录是 **Worker 传输层共享契约测试集**(代号 **P6**),目的是确保
-`antcode_worker.transport.base.TransportBase` 的两个具体实现
+本目录确保 `antcode_worker.transport.base.TransportBase` 的两个具体实现
 (`RedisTransport` / Direct 模式与 `GatewayTransport` / Gateway 模式)
-**永远共享同一套行为契约**。
+**永远共享同一套行为契约**。任何对传输层的重构、协议改动、连接策略变化,
+都必须先让本目录的测试在两种 transport mode 下同时通过。
 
-后续 P1/P2/P3 任何对传输层的重构、协议改动、连接策略变化,
-都必须先让本目录下的测试在两种 transport mode 下同时通过,
-才能合入主干。
+除 transport 契约外,本目录还放了同样跨实现的 Lease 生命周期、tracing、
+protobuf transcode 与 Worker 沙箱文件系统契约。
 
 ## 设计要点
 
@@ -57,12 +56,10 @@ Redis 契约覆盖。
 | `test_transport_control.py`    | `poll_control` / `ack_control` / `send_control_result` |
 | `test_transport_heartbeat.py`  | `send_heartbeat` |
 | `test_transport_resilience.py` | 重连、空轮询、退避 |
+| `test_lease_lifecycle_contract.py` / `test_lease_store.py` | Lease 申请 / 续期 / 撤销 |
+| `test_log_ingest_producer_retention.py` | log ingest stream 保留策略 |
+| `test_tracing.py` / `test_transcode.py` | trace 透传、protobuf <-> Python 转换 |
+| `test_worker_sandbox_filesystem.py` | 沙箱文件系统视图 |
 
-## 为什么不放在 services/worker/tests/?
-
-`services/worker/tests/` 是 Worker 单体的内部测试,
-依赖具体实现的私有细节、可以随实现一起改。
-而本目录是 **跨实现** 的契约层,
-连 services/worker 自己也不能擅自修改契约。
-所以放在仓库根 `tests/contracts/` 下,
-未来即使 worker 模块拆分,这套契约也跟着走。
+放在仓库根而不是 `services/worker` 内,是因为这是 **跨实现** 的契约层——
+worker 自己不能擅自改契约。

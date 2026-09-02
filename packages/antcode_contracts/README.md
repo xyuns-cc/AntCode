@@ -10,29 +10,28 @@ gRPC 契约包 - 包含从 `contracts/proto/` 生成的 Python 代码。
 
 | 文件 | 描述 |
 |------|------|
-| `common.proto` | 通用消息定义（Timestamp, Metrics, OSInfo 等） |
-| `gateway.proto` | Gateway 服务定义（公网 Worker 接入） |
+| `common.proto` | 通用消息定义（Timestamp, Metrics, OSInfo, TraceContext, AuditEvent 等） |
+| `control.proto` | ControlService 控制面（Register / Lease / CancelTask / WatchControl） |
+| `data.proto` | DataService 数据面（StreamTasks / StreamStatus / StreamLogs / StreamSpiderData） |
+| `artifact.proto` | ArtifactService（source bundle 下载 / task artifact 上传） |
 
 ## 生成代码
-
-运行以下命令生成 Python 代码：
 
 ```bash
 ./scripts/gen_proto.sh
 ```
 
+薄封装，实际执行 `scripts/generate_proto.py`（同时修 `.py` 与 `.pyi` 的相对导入）。
+
 ## 使用示例
 
 ```python
-from antcode_contracts import common_pb2, gateway_pb2
-from antcode_contracts import gateway_pb2_grpc
+from antcode_contracts import common_pb2, control_pb2, control_pb2_grpc
 
-# 创建消息
 metrics = common_pb2.Metrics(cpu=50.0, memory=60.0)
-heartbeat = gateway_pb2.Heartbeat(worker_id="worker-1", metrics=metrics)
 ```
 
 ## 依赖
 
-- `grpcio>=1.60.0`
-- `protobuf>=4.25.0`
+- `grpcio>=1.76.0` — 生成桩里 `GRPC_GENERATED_VERSION = '1.76.0'`，低于该版本 import 直接 RuntimeError
+- `protobuf>=6.33.5`

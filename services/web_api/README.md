@@ -25,8 +25,8 @@ uv run python -m antcode_web_api
 
 | 变量名 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `HOST` | `0.0.0.0` | 监听地址 |
-| `PORT` | `8000` | 监听端口 |
+| `BIND_HOST` | `0.0.0.0` | 监听地址 |
+| `SERVER_PORT` | `8000` | 监听端口 |
 | `DATABASE_URL` | - | 数据库连接串 |
 | `ENCRYPTION_KEY` | - | 加密密钥（用于凭证加密等） |
 
@@ -43,8 +43,10 @@ uv run python -m antcode_web_api
 
 ## 🏗️ 模块结构
 
--   `api/`: 路由定义 (Routers)
--   `core/`: 核心配置与工具
+-   `routes/`: 路由定义 (Routers)
 -   `services/`: 业务逻辑层 (Service Layer)
--   `schemas/`: Pydantic 数据模型 (DTO)
--   `models/`: Tortoise ORM 数据库模型
+-   `middleware/`: 中间件（限流、鉴权、trace 等）
+-   `streams/`: SSE 实时日志流
+-   `app_factory.py` / `lifespan.py`: 应用装配与生命周期
+
+数据模型（Tortoise ORM）与 Pydantic Schema 不在本服务内，统一放 `antcode_core.domain`。

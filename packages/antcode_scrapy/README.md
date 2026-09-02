@@ -1,6 +1,6 @@
 # antcode-scrapy
 
-AntCode 规则爬虫的 Scrapy 执行引擎（替换 spiderkit）。
+AntCode 规则爬虫的 Scrapy 执行引擎。
 
 ## 定位
 

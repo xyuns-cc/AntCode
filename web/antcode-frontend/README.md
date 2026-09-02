@@ -1,6 +1,6 @@
 # AntCode 前端项目
 
-基于 React 18 + TypeScript + Ant Design 的现代化任务调度管理前端应用。
+基于 React 19 + TypeScript + Ant Design 的现代化任务调度管理前端应用。
 
 ## ✨ 核心特性
 
@@ -8,7 +8,7 @@
 - 🧭 **Git 项目管理** - 管理仓库来源、任务和运行时环境
 - 📊 **数据可视化** - Chart.js 图表展示任务执行统计
 - 🔄 **实时更新** - SSE 实时推送日志与执行状态
-- 🚀 **性能优化** - 代码分割、懒加载、Gzip/Brotli 压缩
+- 🚀 **性能优化** - 代码分割、懒加载、Gzip 压缩
 - 📱 **响应式设计** - 支持桌面端、平板、手机
 
 ## 📋 目录
@@ -27,8 +27,10 @@
 
 ### 环境要求
 
-- **Node.js**: >= 22.0.0
-- **npm**: >= 10.0.0
+- **Node.js**: >= 22.22.0
+- **npm**: >= 10.9.0
+
+（`package.json` 的 `engines` 是权威值，低于它 `npm install` 会被拒。）
 
 ### 安装与运行
 
@@ -55,7 +57,10 @@ open http://localhost:3000
 | `npm run type-check` | TypeScript 类型检查 |
 | `npm run format` | Prettier 格式化代码 |
 | `npm run clean` | 清理构建缓存 |
-| `npm run build:analyze` | 分析构建产物大小 |
+| `npm run build:analyze` | 生成 `dist/stats.html` 包体分析（不自动开浏览器） |
+| `npm run test` / `test:watch` / `test:ci` | Vitest 单测 |
+| `npm run lint:ci` | `--max-warnings 0`，Docker 构建门禁用 |
+| `npm run build:staging` | staging 模式构建 |
 
 ---
 
@@ -68,44 +73,48 @@ antcode-frontend/
 │   ├── assets/             # 资源文件
 │   ├── components/         # 可复用组件
 │   │   ├── common/         # 通用组件（Layout, AuthGuard, ErrorBoundary）
-│   │   ├── runtimes/       # 运行时相关组件
 │   │   ├── projects/       # 项目相关组件
 │   │   ├── runtimes/       # 运行时相关组件
 │   │   ├── ui/             # UI 组件（LogViewer 等）
-│   │   └── workers/        # Worker 相关组件
+│   │   └── workers/        # Worker 相关组件（含爬虫统计）
 │   ├── config/             # 配置文件
 │   ├── contexts/           # React Context
 │   ├── hooks/              # 自定义 Hooks
-│   │   └── api/            # API 相关 Hooks
+│   │   └── api/            # React Query hooks
 │   ├── lib/                # 第三方库配置
 │   ├── pages/              # 页面组件
 │   │   ├── AlertConfig/    # 告警配置
 │   │   ├── AuditLog/       # 审计日志
+│   │   ├── Crawl/          # 爬虫批次
 │   │   ├── Dashboard/      # 仪表盘
 │   │   ├── Envs/           # 环境管理
 │   │   ├── Login/          # 登录页
-│   │   ├── Logs/           # 日志查看
-│   │   ├── Monitor/        # 监控页面
+│   │   ├── Monitor/        # 监控（无独立路由，Dashboard 内 lazy tab）
 │   │   ├── Projects/       # 项目管理
 │   │   ├── Repositories/   # Git 仓库管理
 │   │   ├── Settings/       # 设置页面
-│   │   ├── SpiderMonitor/  # 爬虫监控
 │   │   ├── SystemConfig/   # 系统配置
-│   │   ├── Tasks/          # 任务管理
+│   │   ├── Tasks/          # 任务管理（含 ExecutionLogs 日志查看）
 │   │   ├── UserManagement/ # 用户管理
 │   │   └── Workers/        # Worker 管理
 │   ├── services/           # API 服务
 │   ├── stores/             # 状态管理（Zustand）
 │   ├── styles/             # 全局样式
+│   ├── test/               # 测试基建（FakeEventSource 等）
 │   ├── types/              # TypeScript 类型定义
 │   ├── utils/              # 工具函数
 │   ├── App.tsx             # 应用根组件
 │   └── main.tsx            # 应用入口
+├── scripts/                # 构建辅助脚本（generate-bundle-report.mjs）
 ├── dist/                   # 构建产物（自动生成）
+├── Dockerfile              # 多阶段构建 + nginx-unprivileged
 ├── eslint.config.js        # ESLint 配置
 ├── index.html              # HTML 入口
 ├── package.json            # 项目配置
-├── tsconfig.json           # TypeScript 配置
+├── tsconfig.json           # TS 根配置（project references）
+├── tsconfig.app.json       # 应用 TS 配置（`npm run type-check` 实际检这个 + node）
+├── tsconfig.node.json      # 构建脚本 TS 配置
+├── vitest.config.ts        # Vitest 配置
 └── vite.config.ts          # Vite 构建配置
 ```
 
@@ -113,37 +122,41 @@ antcode-frontend/
 
 ## 🛠️ 技术栈
 
+版本以 `package.json` 为准，下面只写声明值。
+
 ### 核心框架
-- **React**: 18.3.1 - UI 框架
-- **TypeScript**: 5.6.3 - 类型安全
-- **Vite**: 5.4.10 - 构建工具
+- **React**: 19.2.7（精确锁版，不是 caret）
+- **TypeScript**: ^5.6.3
+- **Vite**: 7.3.6（精确锁版）
 
 ### UI 组件库
-- **Ant Design**: 5.21.6 - UI 组件库
-- **@ant-design/icons**: 5.5.1 - 图标库
+- **Ant Design**: ^5.21.6
+- **@ant-design/icons**: ^5.5.1
 
 ### 状态管理与路由
-- **Zustand**: 5.0.0 - 轻量级状态管理
-- **@tanstack/react-query**: 5.x - 数据获取与缓存
-- **React Router**: 6.27.0 - 路由管理
+- **Zustand**: ^5.0.0 - 轻量级状态管理
+- **@tanstack/react-query**: ^5.66.1 - 数据获取与缓存
+- **react-router**: 8.3.0 - 路由管理（**不是 `react-router-dom`**，仓库里没装它）
 
 ### 数据可视化
-- **Chart.js**: 4.5.1 - 图表库
-- **react-chartjs-2**: 5.3.1 - React 图表封装
+- **Chart.js**: ^4.5.1 + **chartjs-plugin-zoom** ^2.2.0
+- **react-chartjs-2**: ^5.3.1
 
 ### HTTP 客户端
-- **Axios**: 1.7.7 - HTTP 请求库
+- **Axios**: ^1.7.7
 
 ### 工具库
-- **dayjs**: 1.11.13 - 日期处理
-- **immer**: 10.1.1 - 不可变数据
+- **dayjs**: ^1.11.13 / **date-fns**: ^4.1.0 - 日期处理
+- **immer**: ^10.1.1 - 不可变数据
+- **node-forge**: 1.4.0 - 登录口令加密（`src/utils/loginEncryption.ts`）
+- **react-syntax-highlighter**: 16.1.1 - 代码高亮
 
 ### 开发工具
-- **ESLint**: 9.13.0 - 代码检查
-- **Prettier**: 3.3.3 - 代码格式化
-- **TypeScript ESLint**: 8.11.0 - TypeScript 规则
-- **Terser**: 5.36.0 - 代码压缩
-- **vite-plugin-compression**: 0.5.1 - Gzip/Brotli 压缩
+- **ESLint**: ^10.8.0 + **typescript-eslint** ^8.65.0
+- **Prettier**: ^3.3.3
+- **Vitest**: 4.1.10 + @testing-library + jsdom + fake-indexeddb
+- **Terser**: ^5.36.0 - 代码压缩
+- **vite-plugin-compression**: 0.5.1 - Gzip 压缩
 
 ---
 
@@ -154,9 +167,17 @@ antcode-frontend/
 前端开发模式会读取仓库根目录 `.env` 中的 `BIND_HOST`、`SERVER_PORT` 和 `FRONTEND_PORT`。
 通常不需要再单独配置 `VITE_API_BASE_URL`；只有前端需要访问独立 API 域名时才设置它作为显式覆盖。
 
+被读取的 `VITE_*`（`vite.config.ts` + `src/config/app.ts` + `src/utils/constants.ts`）：
+
 ```env
+VITE_API_BASE_URL=
 VITE_APP_TITLE=AntCode 任务调度平台
-VITE_DEV_MODE=true
+VITE_APP_NAME=
+VITE_APP_LOGO_TEXT=
+VITE_APP_LOGO_ICON=
+VITE_APP_LOGO_SHORT=
+VITE_APP_LOGO_URL=
+VITE_APP_FAVICON_URL=
 ```
 
 ### 代码规范
@@ -240,15 +261,20 @@ npm run preview
 ### 构建优化特性
 
 #### ✅ 代码分割
-- React 核心库独立打包 (~173KB)
-- Ant Design 组件库独立打包 (~724KB)
-- Chart.js 图表库独立打包 (~165KB)
-- 工具库独立打包 (~62KB)
+
+`vite.config.ts` 的 `manualChunks` 切 5 个 vendor chunk（体积以 `npm run build:analyze` 实测为准）：
+
+| chunk | 内容 |
+|---|---|
+| `core` | react / react-dom / react-router / zustand / immer |
+| `antd` | antd |
+| `icons` | @ant-design/icons |
+| `charts` | chart.js / react-chartjs-2 / chartjs-plugin-zoom |
+| `syntax` | react-syntax-highlighter |
 
 #### ✅ 资源压缩
 - **Terser** 代码压缩（移除注释、压缩变量名）
-- **Gzip** 压缩（压缩率 ~65-70%）
-- **Brotli** 压缩（压缩率 ~70-75%）
+- **Gzip** 压缩（`vite-plugin-compression`，产出 `.gz`；**没有配 Brotli**）
 
 #### ✅ 性能优化
 - Tree-shaking 移除未使用代码
@@ -269,101 +295,30 @@ cp -r dist/* /usr/share/nginx/html/
 
 #### 2. Nginx 配置
 
-参考配置（与 `Dockerfile` 内置 nginx 模板一致）:
+**唯一权威模板在 `Dockerfile` 里**（`/etc/nginx/templates/default.conf.template`），
+不要手抄一份到别处。自建配置时必须照搬这几条，否则会踩已实测过的坑：
 
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-    root /usr/share/nginx/html;
-    index index.html;
-
-    # 启用 Gzip 压缩
-    gzip on;
-    gzip_vary on;
-    gzip_min_length 1024;
-    gzip_types text/plain text/css text/xml text/javascript application/javascript application/json;
-
-    # 静态资源缓存策略
-    location ~* \.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-
-    # HTML 不缓存
-    location ~* \.html$ {
-        expires -1;
-        add_header Cache-Control "no-store, no-cache, must-revalidate";
-    }
-
-    # SSE 实时日志流：必须关闭缓冲并放宽读超时，否则事件被攒批、
-    # 静默流 60s 被掐断（后端 15s ping + X-Accel-Buffering: no 兜底）
-    location ~ ^/api/v1/logs/runs/[^/]+/stream$ {
-        proxy_pass http://web-api:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-
-    # API 反向代理
-    location /api/ {
-        proxy_pass http://web-api:8000/api/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    # SPA 路由支持
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}
-```
-
-#### 3. 应用配置
-
-```bash
-# 测试配置
-nginx -t
-
-# 重载配置
-nginx -s reload
-```
+- **`proxy_pass` 必须走变量 + `resolver 127.0.0.11 valid=10s`，绝不能写字面主机名。**
+  nginx 对字面主机名只在加载配置时解析一次并永久缓存；`infra/docker/deploy-production.sh`
+  重启 web-api 后 IPAM 会换地址，而 frontend 不在重启序列里 —— 结果是部署后 `/api`
+  永久 502/504 且不自愈（真机实测三个容器地址互换）。
+- `location /api` **不带**尾斜杠、`proxy_pass` 也不带路径，即不做路径重写。
+- SSE 日志流单独一个 `location ~ ^/api/v1/logs/runs/[^/]+/stream$`，关 `proxy_buffering`
+  与 `proxy_cache`、`proxy_read_timeout 3600s`（后端另有 15s ping 与
+  `X-Accel-Buffering: no` 兜底）。
+- 镜像是 nginx-unprivileged，**监听 8080 不是 80**。
+- 六条安全头（CSP / HSTS / X-Frame-Options / X-Content-Type-Options /
+  Referrer-Policy / Permissions-Policy）、`set_real_ip_from` + `real_ip_header`、
+  `client_max_body_size 100m` 都在模板里，别漏。
 
 ### Docker 部署
 
-创建 `Dockerfile`:
-
-```dockerfile
-FROM nginx:alpine
-
-# 复制构建产物
-COPY dist/ /usr/share/nginx/html/
-
-# 复制 Nginx 配置
-COPY nginx.conf.example /etc/nginx/conf.d/default.conf
-
-# 暴露端口
-EXPOSE 80
-
-# 启动 Nginx
-CMD ["nginx", "-g", "daemon off;"]
-```
-
-构建并运行:
+`Dockerfile` 已存在，多阶段（node 构建 + nginx-unprivileged 运行，均 digest 锁定），
+构建阶段内置 `type-check` + `lint:ci` + `build` 门禁：
 
 ```bash
-# 构建镜像
 docker build -t antcode-frontend .
-
-# 运行容器
-docker run -d -p 80:80 antcode-frontend
+docker run -d -p 80:8080 antcode-frontend   # 容器内监听 8080
 ```
 
 ### 环境变量配置
@@ -384,63 +339,22 @@ VITE_LOG_LEVEL=error
 ### 已实施的优化
 
 #### 1. 构建优化
-- ✅ 智能代码分割
-- ✅ Gzip + Brotli 双重压缩
+- ✅ manualChunks 代码分割
+- ✅ Gzip 压缩
 - ✅ Tree-shaking
 - ✅ Terser 代码压缩
 - ✅ CSS 代码分割
 
 #### 2. 加载优化
 - ✅ 懒加载路由组件
-- ✅ DNS 预解析
-- ✅ 预连接 API 服务器
+- ✅ DNS 预解析（`index.html` 的 `dns-prefetch`）
 - ✅ 静态资源 Hash 命名
 
 #### 3. 运行时优化
-- ✅ Ant Design 动画时长优化（减少 50%）
 - ✅ 使用 React.memo 减少重渲染
-- ✅ 虚拟滚动优化长列表
+- ✅ 虚拟滚动长列表（`VirtualLogViewer`，阈值 100 行）
 
-### 性能指标
-
-#### 构建性能
-```
-构建时间：~6 秒
-构建产物：6.1 MB（未压缩）
-压缩后总大小：~2.5 MB（Gzip）/ ~2.0 MB（Brotli）
-```
-
-#### 包大小分析（Brotli 压缩后）
-```
-主应用包：      110 KB → 23 KB (-79%)
-React 核心：    173 KB → 47 KB (-73%)
-Ant Design：    724 KB → 161 KB (-78%)
-Chart.js：      165 KB → 48 KB (-71%)
-工具库：        62 KB → 21 KB (-66%)
-
-总计首屏：     ~1.2 MB → ~320 KB (-73%)
-```
-
-#### 首屏加载（4G 网络）
-```
-FCP (First Contentful Paint): < 1.5s
-LCP (Largest Contentful Paint): < 2.5s
-TTI (Time to Interactive): < 3.5s
-```
-
-### 持续优化建议
-
-#### 短期优化
-1. 实施虚拟滚动优化长列表
-2. 添加 Service Worker 支持离线访问
-3. 图片懒加载和 WebP 格式
-4. 实施资源预加载策略
-
-#### 长期优化
-1. 考虑 SSR/SSG 提升首屏性能
-2. 实施微前端架构（如需要）
-3. 探索 Rust 工具链（如 SWC）
-4. 升级到 React 19（正式版发布后）
+体积与首屏耗时不在此处写死；每次改完跑 `npm run build:analyze` 看 `dist/stats.html`。
 
 ---
 
@@ -448,13 +362,8 @@ TTI (Time to Interactive): < 3.5s
 
 ### Q1: 端口冲突怎么办？
 
-修改 `vite.config.ts` 中的 `server.port`:
-
-```typescript
-server: {
-  port: 3001, // 改为其他端口
-}
-```
+改仓库根 `.env` 的 `FRONTEND_PORT`。`vite.config.ts` 的 `server.port` 是从这个 env
+算出来的，直接改死值会被覆盖逻辑绕开。
 
 ### Q2: API 请求失败？
 
@@ -473,7 +382,7 @@ npm run dev
 
 ```bash
 # 检查 Node.js 版本
-node --version  # 应该 >= 22.0.0
+node --version  # 应该 >= 22.22.0
 
 # 重新安装依赖
 rm -rf node_modules package-lock.json
@@ -491,22 +400,19 @@ npm install
 如果使用 nvm:
 
 ```bash
-# 切换到 Node.js 22
-nvm use v22.13.0
+nvm use 22
 
-# 验证版本
-node --version  # 应该显示 v22.13.0
-npm --version   # 应该显示 >= v10.0.0
+node --version  # 需 >= v22.22.0
+npm --version   # 需 >= 10.9.0
 ```
 
 ### Q7: 如何分析包大小？
 
 ```bash
-# 构建并生成可视化报告
 npm run build:analyze
 ```
 
-这将在浏览器中打开一个交互式的包大小分析图。
+产出 `dist/stats.html`（treemap），自己开浏览器打开——脚本传了 `--open false`，不会自动弹。
 
 ### Q8: 主题切换不工作？
 
@@ -532,31 +438,12 @@ npm run build:analyze
 
 1. **代码分割**: 减少首屏加载时间
 2. **懒加载**: 按需加载路由和组件
-3. **类型安全**: 100% TypeScript 覆盖
-4. **性能优化**: Gzip/Brotli 压缩、缓存策略
+3. **类型安全**: `src/` 全 TypeScript，`strict: true`
+4. **性能优化**: Gzip 压缩、缓存策略
 5. **错误处理**: ErrorBoundary 优雅降级
 6. **状态管理**: Zustand 轻量级状态管理
 
----
-
-## 📝 更新日志
-
-### v1.0.0 (2026-01-15)
-
-#### 优化
-- ✅ 升级到 Node.js 22.13.0
-- ✅ 修复所有 ESLint 错误
-- ✅ 实施代码分割和懒加载
-- ✅ 添加 Gzip/Brotli 压缩
-- ✅ 优化构建配置
-- ✅ 改进 Nginx 配置
-
-#### 新增
-- ✅ 环境管理页面
-- ✅ 监控页面
-- ✅ Git 仓库来源管理
-- ✅ 主题切换功能
-- ✅ 节点环境选择器
+版本历史见仓库根 [`CHANGELOG.md`](../../CHANGELOG.md)。
 
 ---
 

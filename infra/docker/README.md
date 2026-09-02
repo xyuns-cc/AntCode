@@ -63,22 +63,31 @@ docker compose -f docker-compose.dev.yml up -d --force-recreate
 │   ├── keys/
 │   ├── work/
 │   └── temp/
-└── worker/           # worker
-    ├── runs/
-    ├── runtimes/
-    ├── temp/
-    ├── secrets/
-    └── identity/
+├── worker/           # worker
+│   ├── runs/
+│   ├── runtimes/
+│   ├── temp/
+│   ├── secrets/
+│   └── identity/
+└── toolchains/       # worker：UV_PYTHON_INSTALL_DIR / MISE_STATE_DIR
+    ├── uv-python/
+    └── mise-state/
 ```
 
 ## Volume 说明
+
+生产三个控制面服务各持一个**独立**卷，不共享：
 
 | Volume | 用途 |
 |---|---|
 | `postgres_data` | PostgreSQL 数据 |
 | `redis_data` | Redis 数据 |
-| `backend_data` | Web API 与 Master 共享的 `/app/data`，避免宿主目录 UID/GID 不匹配 |
-| `worker_data` | 挂载到 `/app/data` 的运行时数据 |
+| `redis_acl` | Redis ACL 文件（dev） |
+| `web_data` | Web API 的 `/app/data` |
+| `master_data` | Master 的 `/app/data` |
+| `gateway_data` | Gateway 的 `/app/data` |
+| `worker_data` | Worker 的 `/app/data`，卷名由 `ANTCODE_WORKER_DATA_VOLUME` 强制唯一 |
+| `backup_data` | 本地备份 override 专用 |
 
 ## 关键环境变量
 
@@ -159,13 +168,14 @@ frontend、数据库初始化或 mTLS bootstrap 参数的骨架。
 **本仓库不再包含任何自动化发布流水线，也不再产出 registry 镜像。** 五个应用镜像
 （web-api / master / gateway / worker / frontend）由生产 Compose 自己的 `build:` 段在
 部署机上就地构建：`deploy-production.sh` 先 `docker compose build`，再
-`docker compose pull --ignore-buildable` 拉取仍按 digest pin 的第三方运行时镜像
-（postgres / redis / 反向代理，权威取值见 `release-runtime-images.json`）。
+`docker compose pull postgres redis reverse-proxy` 拉取仍按 digest pin 的第三方运行时镜像
+（权威取值见 `release-runtime-images.json`）。**必须点名这三个服务，不能用
+`--ignore-buildable`**：migration / crawl-redis-preflight 只引用不构建，会被拿去 registry
+解析而必然 403（脚本 `RUNTIME_SERVICES` 常量由契约测试锁住）。
 
-**代价必须认清**：本地构建没有不可变产物，也没有签名与来源证明——cosign 验签链路
-（`verify-production-images.sh` 与 release collection 元数据镜像）已随发布链路一并删除，
-信任边界因此变成**部署机本身与它的源码树**。回滚不能再切回一个旧 digest，只能 revert
-源码后重新构建，回滚窗口要把构建时长算进去。
+**代价必须认清**：本地构建没有不可变产物，也没有签名与来源证明，信任边界因此变成
+**部署机本身与它的源码树**。回滚不能再切回一个旧 digest，只能 revert 源码后重新构建，
+回滚窗口要把构建时长算进去。
 
 因此 `ANTCODE_IMAGE_TAG` 必须每次发布唯一，**推荐直接用被部署的 40 位 Git commit**：
 它是把运行中的容器对回一次确定源码构建的唯一线索。复用同一个 tag 会让 `up -d` 认为
@@ -177,8 +187,13 @@ frontend、数据库初始化或 mTLS bootstrap 参数的骨架。
 
 生产 `.env.production` 只保存镜像 tag / digest、端口、资源值和 secret **文件路径**，
 不保存 secret 内容。数据库 URL、Redis URL、PostgreSQL 密码、Redis health 密码、
-JWT 和加密密钥全部通过 Docker secrets 只读挂载。应用镜像的固定入口脚本严格读取
+JWT 和加密密钥全部通过 Docker secrets 只读挂载。`entrypoint.load-secrets.sh` 对
+`DATABASE_URL` / `REDIS_URL` / `ENCRYPTION_KEY` / `ENCRYPTION_KEY_SALT` /
+`ENCRYPTION_KEYS_LEGACY` / `DEFAULT_ADMIN_PASSWORD` / `ANTCODE_WORKER_KEY` 严格读取
 `*_FILE` 后再启动应用；缺文件、不可读或同时配置 inline 值都会直接失败。
+
+`JWT_SECRET` 不走入口脚本：它由应用内 `antcode_core.common.security.auth` 读
+`JWT_SECRET_FILE`，且 **inline `JWT_SECRET` 优先、两者并存时静默胜出不报错**。
 
 1. 把部署机源码树切到要发布的 revision（`git status --porcelain` 必须为空——工作区脏
    等于发布了一份无法复现的镜像），并把 `ANTCODE_IMAGE_TAG` 设为该 revision 的 40 位
@@ -230,8 +245,8 @@ JWT 和加密密钥全部通过 Docker secrets 只读挂载。应用镜像的固
    默认禁用，不能当成灾备。
 
 部署机必须能完整构建本仓镜像（Docker + 到基础镜像 registry 的网络）。脚本冻结环境文件，
-先 `compose build` 构建五个应用镜像、再 `compose pull --ignore-buildable` 拉取按 digest pin
-的第三方镜像；两步都排在 `stop` 之前，任一步失败时正在跑的控制面一个容器都还没被动过。
+先 `compose build` 构建五个应用镜像、再 `compose pull postgres redis reverse-proxy` 拉取按
+digest pin 的第三方镜像；两步都排在 `stop` 之前，任一步失败时正在跑的控制面一个容器都还没被动过。
 随后停止 writer、执行 Redis 门禁和数据库 migration；任一步失败都会中止，全部成功后才启动
 长期服务：
 
@@ -262,12 +277,14 @@ infra/docker/deploy-production.sh .env.production fresh-deploy
 `rotate-encryption-key` 的 `--confirm-writers-stopped` 是对所有外部 writer 也已停机的
 明确确认。
 
-所有长期服务都设置 CPU、内存、PID、只读根和日志轮转边界；Redis 使用
-`maxmemory` + `noeviction`。
+所有长期服务都设置 CPU、内存、PID 和日志轮转边界；Redis 使用
+`maxmemory` + `noeviction`。只读根只给一次性容器（migration / crawl-redis-preflight）
+和 `backup-local`，postgres / redis 官方镜像跑只读根需额外改造，这里有意不开。
 
 Compose（非 Swarm）不会因为容器 unhealthy 做任何事，`restart:` 只对 PID 1 退出
 生效，所以自愈靠探针主动向 PID 1 发 TERM。这件事统一由 `infra/docker/healthcheck.sh`
-完成，各服务以只读方式把它挂到 `/usr/local/bin/antcode-healthcheck`：
+完成，生产各服务以只读方式把它挂到 `/usr/local/bin/antcode-healthcheck`
+（dev 只有 worker 挂，其余 dev 服务走裸 curl/wget 探针）：
 
 ```
 antcode-healthcheck <max_failures> <grace_seconds> <存活探针>  [&& <就绪探针>]
@@ -292,8 +309,8 @@ readiness，结果是“忙”和“Redis 抖了一下”被判成“进程坏�
 
 ### 一次性管理员与 Worker bootstrap
 
-常驻 Compose 不含默认管理员密码或 Worker 安装 Key。新库使用已验证的原子发布集合
-启动 PostgreSQL/Redis 并执行一次性管理员 migration，成功后立即删除宿主密码文件：
+常驻 Compose 不含默认管理员密码或 Worker 安装 Key。脚本构建 web-api 镜像、拉起
+PostgreSQL/Redis，再跑一次性管理员 migration，成功后立即删除宿主密码文件：
 
 ```bash
 infra/docker/bootstrap-admin.sh .env.production
@@ -312,8 +329,8 @@ infra/docker/bootstrap-worker.sh .env.production
 
 脚本只在 bootstrap 容器达到 healthy 后才删除该容器，并用同一独立数据卷重建不
 挂载安装 Key 的正式 Worker；失败会返回非零。成功后立即删除宿主安装 Key 文件。
-后续升级使用同一环境快照完成 collection 校验、pull 和启动，不能把多个实例 scale
-到同一 service：
+后续升级用同一环境快照就地 `build worker` + `up -d --no-deps --wait worker`
+（构建失败即中止，不动正在跑的旧容器），不能把多个实例 scale 到同一 service：
 
 ```bash
 infra/docker/deploy-worker.sh .env.production
@@ -351,8 +368,8 @@ infra/docker/verify-backup-restore.sh \
 
 脚本先验证 checksum，再以 `--clean --single-transaction --exit-on-error` 原子恢复，
 把恢复库 URL 只注入 migration 子进程，随后再次核对实际库名。后验会检查当前核心
-表、索引 valid/ready、约束 validated、明文 Worker 凭据列已删除、敏感数据迁移
-ledger、基础系统配置和用户角色一致性，并输出 users/workers/projects/tasks/runs/
+表存在、`workers` 的 hash / encrypted 凭据列类型匹配、索引 valid/ready、约束
+validated、基础系统配置和用户角色一致性，并输出 users/workers/projects/tasks/runs/
 configs/audit 的精确行数作为演练证据。配置 `RESTORE_READINESS_URL` 时，该 URL 必须
 属于只连接本次恢复库和测试 Redis 的候选 Web API，脚本还会要求其真实 readiness
 通过；不能指向现网 Web API。未配置时脚本只明确报告“数据库恢复演练通过、应用
@@ -366,9 +383,12 @@ RTO、应用 readiness/业务 smoke test 和异机副本证据；不得把本脚
 
 ## 测试机验收
 
-仓库不再维护单独的远程验收 Compose override。测试机上的开发功能验收使用
-`docker-compose.dev.yml`；它固定把 HTTP、PostgreSQL、Redis 和明文 Gateway 端口
-绑定到回环地址，只能通过 SSH 隧道或测试机本机访问，不得直接暴露到测试网或公网。
+**生产画像 E2E 的唯一入口是 `infra/docker/run-gateway-e2e.sh`**，它加载
+`docker-compose.prod.e2e-control.yml` / `docker-compose.prod.e2e-worker.yml` 两个
+override（服务清单同时被 `scripts/release_e2e_compose.py` 声明、由单测锁住）。
+
+开发功能验收另走 `docker-compose.dev.yml`；它固定把 HTTP、PostgreSQL、Redis 和明文
+Gateway 端口绑定到回环地址，只能通过 SSH 隧道或测试机本机访问，不得直接暴露到测试网或公网。
 
 以下命令均从项目根目录执行，并使用独立的 Compose project。`down -v` 会删除该
 测试 project 的数据库、Redis 和应用卷，只能用于已确认无需保留数据的测试环境：

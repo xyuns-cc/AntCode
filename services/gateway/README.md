@@ -36,16 +36,18 @@ uv run python -m antcode_gateway
 
 ## 🔒 安全配置建议
 
-为了确保通讯安全，强烈建议在生产环境启用 TLS：
+TLS 没有独立开关，配了证书路径就启用：
 
 ```bash
-export GRPC_TLS_ENABLED=true
 export GRPC_TLS_CERT_PATH=/path/to/server.crt
 export GRPC_TLS_KEY_PATH=/path/to/server.key
 ```
 
-若需极高安全性，可开启 mTLS (双向认证)：
+再补 CA 即为 mTLS（校验客户端证书，CN/SAN 须匹配 worker_id）：
 
 ```bash
 export GRPC_TLS_CA_PATH=/path/to/ca.crt
 ```
+
+`AUTH_ENABLED=true` 但没有 TLS 证书时网关拒绝启动（凭证会明文传输），
+仅本地测试可用 `ANTCODE_GATEWAY_ALLOW_INSECURE=true` 显式放行。

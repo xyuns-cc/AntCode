@@ -33,13 +33,22 @@ uv run python -m antcode_master
 
 ## ⚙️ 内部机制
 
-### 调度循环 (Tick Loop)
-Master 内部运行着一个高频的事件循环 (Tick)，每秒钟会执行一次检查：
--   检查是否有新任务到达预定时间。
--   检查是否有正在运行的任务超时。
--   检查是否有 Worker 心跳超时。
+### 后台 loop
+没有统一的 tick；12 个 loop 各有自己的节拍，分 control / ingester 两组并行启动
+（见 `antcode_master/__main__.py`）。几个关键节拍：
+
+-   `lease_sweeper` 1s —— 扫过期 lease，触发失租剔除（Worker 存活判定走这里，不是心跳轮询）
+-   `reconcile` 60s —— 任务状态收敛与超时判定
+-   `scheduler` / `scheduler_event` / `crawl_batch_status` / `artifact_cleanup` leader poll 30s
+-   `result` / `log_ingest` 1s，走 XREADGROUP consumer name 天然分区，可分片到多实例；
+    其余 loop leader-only
 
 ### 队列管理
-Master 使用 Redis Stream 作为消息队列，确保消息的持久化与顺序性。
--   **Stream Key**: `antcode:tasks:stream`
--   **Group Name**: `antcode:workers`
+Redis Stream，key 命名的权威定义在
+`antcode_core.infrastructure.redis.control_plane`：
+
+-   **任务 ready stream**: `{<ns>}:task:ready:<worker_id>`（每 Worker 一条，与 lease 同 hash slot）
+-   **结果 stream**: `<ns>:task:result`
+-   **消费组**: `<ns>-workers`（连字符，不是冒号）
+
+`<ns>` 即 `REDIS_NAMESPACE`，默认 `antcode`。

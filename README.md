@@ -10,10 +10,10 @@
 
 ### 前置
 
-- **PostgreSQL 14+**，一个空库
-- **Redis 6+**（standalone / cluster / sentinel 都支持）
+- **PostgreSQL 16**，一个空库（Compose 模板 pin 的版本）
+- **Redis 7.4**（standalone / cluster / sentinel 都支持）
 - **Python 3.11+** 和 [uv](https://github.com/astral-sh/uv)
-- **Node.js 20+**（前端）
+- **Node.js 22.22+ / npm 10.9+**（前端 `package.json` 的 `engines` 硬门禁）
 
 ### 5 步跑通
 
@@ -57,9 +57,9 @@ make dev-web     # 起前端
 ## 架构一句话
 
 - **web_api** — 用户入口 REST + SSE 实时日志流，落 PG，走 Redis 分布式限流
-- **master** — 调度 + 状态收敛：13 个后台 loop，leader 抢主，其中 2 个 stream ingest loop 可分片到多实例
+- **master** — 调度 + 状态收敛：12 个后台 loop，leader 抢主，其中 2 个 stream ingest loop 可分片到多实例
   - control 组（7）：scheduler / scheduler_event / scheduler_outbox / reconcile / retry / lease_sweeper / redispatch
-  - ingester 组（6）：result / log_ingest / artifact_cleanup / crawl_batch_status / alert_check / worker_registration_cleanup
+  - ingester 组（5）：result / log_ingest / artifact_cleanup / crawl_batch_status / worker_registration_cleanup
 - **worker** — 任务执行：插件化（code / spider / render / rule），沙箱 rlimit（CPU/RAM/FSIZE），支持 Direct（Redis Streams）和 Gateway（gRPC）双传输
 - **gateway** — 跨网络接入：worker 走 gRPC 到 gateway，gateway 落 Redis，master 消费
 
@@ -67,7 +67,7 @@ make dev-web     # 起前端
 
 - **调度**：一次性 / 周期性 / Cron / 依赖链
 - **规则爬虫**：Scrapy 2.16 引擎，5 种翻页策略（url_pattern / url_param / click_element / js_click / infinite_scroll），XPath/CSS/正则抽取，Playwright 渲染
-  - **当前不支持**（安全 spool 模式不向 Rule 子进程下发 Redis / 代理凭据，env 白名单见 `services/worker/src/antcode_worker/executor/rule_policy.py`）：内容级跨 run 去重（`dedup_config` 配了也会被跳过并打 warning）、代理池（`proxy_config.enabled=true` 直接校验失败）、scrapy-redis 断点续爬（`resume_enabled=true` 直接校验失败）
+  - **当前不支持**（安全 spool 模式不向 Rule 子进程下发 Redis / 代理凭据，env 白名单见 `services/worker/src/antcode_worker/executor/rule_policy.py`）：内容级跨 run 去重（`dedup_config.enabled=true` 直接报错中止）、代理池（`proxy_config.enabled=true` 直接校验失败）、scrapy-redis 断点续爬（`resume_enabled=true` 直接校验失败）
   - `engine=curl_cffi`（TLS/JA3 指纹伪装）**需自行安装**：`scrapy-impersonate` 不在 pyproject 依赖里，Worker 环境未 `pip install scrapy-impersonate` 时会显式报错而非静默降级
 - **可观测**：Prometheus `/metrics` 端点（HTTP QPS / 延迟 / worker 在线数 / 补派队列），SSE 实时日志，全链路 trace_id
 - **可靠性**：at-least-once（XAUTOCLAIM + PEL 回收 + 跨机 SET NX 去重）、派发失败自动补派（指数退避）、优雅停机（SIGTERM + drain + deregister）
@@ -79,8 +79,8 @@ make dev-web     # 起前端
 ```
 packages/           workspace 包
 ├── antcode_core/         # 领域模型 + 应用服务 + 基础设施（PG / Redis / cache）
-├── antcode_contracts/    # gRPC proto + 生成的 pb2
-└── antcode_scrapy/       # Scrapy 引擎 + sink 抽象（Redis / Gateway）
+├── antcode_contracts/    # 由 contracts/proto/ 生成的 pb2 / pb2_grpc
+└── antcode_scrapy/       # Scrapy 引擎 + sink 抽象（spool / Gateway）
 
 services/           独立服务
 ├── web_api/              # FastAPI REST + SSE 日志流
@@ -88,9 +88,11 @@ services/           独立服务
 ├── worker/               # 任务执行引擎
 └── gateway/              # gRPC 网关（可选）
 
+contracts/proto/          # proto 源文件（common / control / data / artifact）
 web/antcode-frontend/     # React + Antd 前端
 scripts/                  # init_db.py 等
 infra/docker/             # Docker 部署模板
+tests/                    # unit / boundary / contracts / integration / e2e / loadtest
 ```
 
 运行手册、API 参考与部署细则不在本仓库维护。各目录的 README 与 `.env.example`

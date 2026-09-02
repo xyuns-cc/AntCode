@@ -6,45 +6,38 @@
 
 ```
 tests/
-├── boundary/              # 边界与属性测试
-│   ├── test_import_boundary.py     # 导入边界测试
-│   └── test_service_boundary.py    # 服务边界测试
+├── boundary/              # 边界与属性测试（导入边界、分层边界、术语一致性）
+├── contracts/             # Worker transport 跨实现契约（需真 Redis，见该目录 README）
 ├── e2e/                   # 端到端测试
-│   ├── test_task_lifecycle.py      # 任务生命周期测试
-│   ├── test_worker_lifecycle.py    # Worker 生命周期测试
-│   └── test_log_streaming.py       # 日志流测试
 ├── integration/           # 集成测试
-│   └── worker/            # Worker 集成测试
-│       ├── test_worker_integration.py
-│       └── ...
-├── loadtest/              # 压力测试
-│   ├── test_task_throughput.py     # 任务吞吐量测试
-│   ├── test_worker_scalability.py  # Worker 可扩展性测试
-│   └── test_log_throughput.py      # 日志吞吐量测试
+│   ├── crawl/
+│   ├── gateway/
+│   ├── postgres/
+│   └── worker/
+├── loadtest/              # 压力测试（默认惰性，见该目录 README）
 └── unit/                  # 单元测试
     ├── core/              # antcode_core 包测试
     ├── gateway/           # Gateway 服务测试
     ├── master/            # Master 服务测试
+    ├── scrapy/            # antcode_scrapy 包测试
+    ├── scripts/           # scripts/ 下工具脚本测试
     ├── web_api/           # Web API 服务测试
-    ├── worker/            # Worker 服务测试
-    └── test_*.py          # 通用单元测试
+    └── worker/            # Worker 服务测试
 ```
 
 ## 测试类型
 
 ### 单元测试 (`tests/unit/`)
 
-按服务/包组织的单元测试：
-- `tests/unit/core/` - antcode_core 包测试
-- `tests/unit/gateway/` - Gateway 服务测试
-- `tests/unit/master/` - Master 服务测试
-- `tests/unit/web_api/` - Web API 服务测试
-- `tests/unit/worker/` - Worker 服务测试
+按服务/包组织，不依赖外部中间件。
 
 ### 集成测试 (`tests/integration/`)
 
-组件间交互测试：
-- `tests/integration/worker/` - Worker 集成测试（Direct/Gateway 模式）
+组件间交互测试，需要真 Redis + PostgreSQL。
+
+### 契约测试 (`tests/contracts/`)
+
+`TransportBase` 的 Redis Direct 与 Gateway 两个实现共享同一套断言，需要真 Redis。
 
 ### 边界测试 (`tests/boundary/`)
 
@@ -60,11 +53,9 @@ tests/
 
 ## 运行测试
 
-### 运行所有测试
-
-```bash
-uv run pytest tests/
-```
+裸 `pytest`（= `make test`）只跑 `testpaths` 声明的 `tests/unit` + `tests/boundary`。
+**不要跑 `pytest tests/`** —— 它会连 `tests/e2e` 一起收集，而 e2e 需要完整容器栈，
+在开发机上必失败。其余套件各自需要真实依赖，按下面的小节单独执行。
 
 ### 运行单元测试
 
@@ -122,6 +113,15 @@ uv run pytest tests/integration/ -v
 uv run pytest tests/boundary/
 ```
 
+### 运行契约测试
+
+需要一次性 Redis（默认 `localhost:16379` DB 14）；起停方式与文件组织见
+[`tests/contracts/README.md`](contracts/README.md)。
+
+```bash
+uv run pytest tests/contracts/ -v
+```
+
 ### 运行端到端测试
 
 ```bash
@@ -173,13 +173,18 @@ DATABASE_URL=postgresql://antcode:password@127.0.0.1:15432/antcode_e2e_test
 asyncio_mode = "strict"
 addopts = "--strict-markers"
 pythonpath = ["."]
+testpaths = ["tests/unit", "tests/boundary"]
+filterwarnings = [
+    "ignore:'crypt' is deprecated:DeprecationWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 markers = [
     "integration: 集成测试标记",
-    "e2e: 端到端测试标记",
+    "e2e: 需要显式确认和专用测试环境的端到端测试",
     "pbt: 边界/属性测试标记",
-    "transport(mode): 传输合同覆盖模式",
-    "loadtest_scenario: 外部压测场景",
-    "loadtest_write: 会写入数据的压测场景",
+    "transport(mode): Worker transport implementation covered by a contract test",
+    "loadtest_scenario: guarded external load-test scenario",
+    "loadtest_write: load-test scenario that creates or triggers tasks",
 ]
 ```
 

@@ -495,7 +495,7 @@ _workers_resources.register_resources_routes(router)
 _workers_dispatch.register_dispatch_routes(router, _sys.modules[__name__])
 # P2 拆分: 3 个 stats/history 查询 handler 挂路由
 _workers_stats.register_stats_routes(router, _require_worker_access)
-# P2 拆分: register-direct / register(410) / heartbeat 3 handler 挂路由
+# P2 拆分: register-direct 1 handler 挂路由
 _workers_register.register_register_routes(router, _mask_redis_url)
 _workers_crud.register_crud_routes(
     router,
