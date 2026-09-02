@@ -2009,7 +2009,7 @@
       "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1344
+      "value": 1336
     },
     {
       "path": "services/worker/src/antcode_worker/transport/redis/transport.py",
