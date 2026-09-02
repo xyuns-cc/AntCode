@@ -776,12 +776,6 @@
       "value": 7
     },
     {
-      "path": "scripts/healthcheck.py",
-      "function": "_check_health",
-      "rule": "PLR2004",
-      "value": 1
-    },
-    {
       "path": "services/gateway/src/antcode_gateway/rate_limit.py",
       "function": "RateLimitInterceptor.__init__",
       "rule": "POSITIONAL_ARGS",
