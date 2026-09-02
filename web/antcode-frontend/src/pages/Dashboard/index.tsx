@@ -6,7 +6,7 @@ import {
   ExclamationCircleOutlined, PlayCircleOutlined, ThunderboltOutlined,
   FieldTimeOutlined, DatabaseOutlined, GlobalOutlined
 } from '@ant-design/icons'
-import { dashboardService, type DashboardStats, type SystemMetrics, type HourlyTrendItem } from '@/services/dashboard'
+import { dashboardService, systemHealthFromMetrics, type DashboardStats, type SystemMetrics, type HourlyTrendItem } from '@/services/dashboard'
 import { workerService } from '@/services/workers'
 import type { WorkerAggregateStats, ClusterSpiderStats } from '@/types'
 import SpiderStatsTab from '@/components/workers/SpiderStatsTab'
@@ -154,11 +154,16 @@ const Dashboard: React.FC = memo(() => {
     return n.toString()
   }
 
-  // 系统健康状态
-  const healthStatus = dashboardStats?.system.status === 'normal' ? '健康' :
-                       dashboardStats?.system.status === 'warning' ? '警告' : '异常'
-  const healthColor = dashboardStats?.system.status === 'normal' ? token.colorSuccess :
-                      dashboardStats?.system.status === 'warning' ? token.colorWarning : token.colorError
+  // 系统健康状态。取的是真的 systemMetrics：之前读的 dashboardStats.system.status
+  // 由 getDashboardStats 恒定填 'normal'（阈值函数从没被调用过），于是 CPU 打满也报「健康」。
+  const systemHealth = systemHealthFromMetrics(systemMetrics)
+  const healthStatus = { normal: '健康', warning: '警告', error: '异常', unknown: '未知' }[systemHealth]
+  const healthColor = {
+    normal: token.colorSuccess,
+    warning: token.colorWarning,
+    error: token.colorError,
+    unknown: token.colorTextSecondary,
+  }[systemHealth]
 
   return (
     <PageContainer scrollable>
@@ -179,7 +184,7 @@ const Dashboard: React.FC = memo(() => {
               width: 10, height: 10, borderRadius: '50%',
               background: healthColor,
               boxShadow: `0 0 8px ${healthColor}`,
-              animation: dashboardStats?.system.status === 'normal' ? 'pulse 2s infinite' : undefined
+              animation: systemHealth === 'normal' ? 'pulse 2s infinite' : undefined
             }} />
             <Text strong style={{ fontSize: 13 }}>系统状态: {healthStatus}</Text>
           </Flex>

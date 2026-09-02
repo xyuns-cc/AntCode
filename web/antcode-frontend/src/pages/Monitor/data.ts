@@ -7,6 +7,20 @@ import type {
   WorkerOs,
 } from './types'
 
+/**
+ * 「上次检查」文案。
+ *
+ * 取的是最后一次**拉取成功**的时刻：后台每 10 秒轮询一次，失败时不推进该时刻，
+ * 所以后端挂掉时这里会如实变老，而不是继续报「刚刚」。`null` = 一次都没成功过，
+ * 不能当成「刚刚检查过」。
+ */
+export const describeLastChecked = (lastSuccessAt: number | null, now: number): string => {
+  if (lastSuccessAt === null) return '尚未成功获取'
+  const minutes = Math.floor(Math.max(0, now - lastSuccessAt) / 60_000)
+  if (minutes < 1) return '刚刚'
+  return minutes >= 10 ? '10分钟前' : `${minutes}分钟前`
+}
+
 const formatUptime = (seconds?: number): string => {
   if (!seconds) return '未知'
   const days = Math.floor(seconds / 86400)

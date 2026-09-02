@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { globalMessage } from '@/hooks/useMessage'
 import { workerService } from '@/services/workers'
-import { transformWorker } from '../data'
+import { describeLastChecked, transformWorker } from '../data'
 import type { WorkerDisplayData } from '../types'
 
 const REFRESH_INTERVAL_MS = 10_000
@@ -10,20 +10,24 @@ const CHECKED_TIME_INTERVAL_MS = 60_000
 export const useWorkers = () => {
   const [loading, setLoading] = useState(false)
   const [workers, setWorkers] = useState<WorkerDisplayData[]>([])
-  const [lastChecked, setLastChecked] = useState('刚刚')
+  const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null)
+  // 每分钟走一格，只为让「N分钟前」自己变老；不携带任何业务含义。
+  const [now, setNow] = useState(() => Date.now())
 
-  const loadWorkers = useCallback(async (showLoading = true) => {
+  // 返回值是「这次拉取成功了吗」：调用方据此决定报成功还是保持沉默，
+  // 不能凭「调用发出去了」就弹成功。
+  const loadWorkers = useCallback(async (showLoading = true): Promise<boolean> => {
     if (showLoading) setLoading(true)
     try {
-      const [allWorkers] = await Promise.all([
-        workerService.getAllWorkers(),
-        workerService.getAggregateStats(),
-      ])
+      const allWorkers = await workerService.getAllWorkers()
       setWorkers(allWorkers.map(transformWorker))
-      setLastChecked('刚刚')
+      setLastSuccessAt(Date.now())
+      setNow(Date.now())
+      return true
     } catch (error) {
       console.error('加载Worker 数据失败:', error)
       if (showLoading) globalMessage.error('加载Worker 数据失败')
+      return false
     } finally {
       if (showLoading) setLoading(false)
     }
@@ -35,22 +39,20 @@ export const useWorkers = () => {
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      loadWorkers(false)
-      setLastChecked('刚刚')
+      void loadWorkers(false)
     }, REFRESH_INTERVAL_MS)
     return () => window.clearInterval(interval)
   }, [loadWorkers])
 
   useEffect(() => {
-    const interval = window.setInterval(() => setLastChecked((previous) => {
-      if (previous === '刚刚') return '1分钟前'
-      const match = previous.match(/(\d+)分钟前/)
-      if (!match) return previous
-      const minutes = parseInt(match[1]) + 1
-      return minutes >= 10 ? '10分钟前' : `${minutes}分钟前`
-    }), CHECKED_TIME_INTERVAL_MS)
+    const interval = window.setInterval(() => setNow(Date.now()), CHECKED_TIME_INTERVAL_MS)
     return () => window.clearInterval(interval)
   }, [])
 
-  return { loading, workers, lastChecked, refresh: loadWorkers }
+  return {
+    loading,
+    workers,
+    lastChecked: describeLastChecked(lastSuccessAt, now),
+    refresh: loadWorkers,
+  }
 }

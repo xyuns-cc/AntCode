@@ -69,10 +69,25 @@ export const createChartOptions = (token: GlobalToken) => ({
   scales: scales(token, 8),
 }) satisfies ChartOptions<'line'> & ChartOptions<'bar'>
 
+// 任务柱状图画的是「条数」，不是百分比。共用的 tooltip 无条件给数值加 `%`
+// （CPU/内存/磁盘那几张图才需要），照搬过来会把 42 条任务显示成「任务数量: 42%」，
+// 而同一根柱子的 y 轴刻度写的是 42。所以这里换掉 label 回调。
 export const createTaskBarOptions = (
   chartOptions: ReturnType<typeof createChartOptions>,
 ) => ({
   ...chartOptions,
+  plugins: {
+    ...chartOptions.plugins,
+    tooltip: {
+      ...tooltip,
+      callbacks: {
+        label(context: { dataset: { label?: string }; parsed: { y: number | null } }) {
+          const prefix = context.dataset.label ? `${context.dataset.label}: ` : ''
+          return context.parsed.y === null ? prefix : `${prefix}${context.parsed.y}`
+        },
+      },
+    },
+  },
   scales: { y: { beginAtZero: true } },
 }) satisfies ChartOptions<'bar'>
 

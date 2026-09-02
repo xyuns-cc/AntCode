@@ -32,9 +32,9 @@ export const useMonitorController = () => {
     workerHistory,
   })
 
-  const handleRefresh = () => {
-    refresh(true)
-    globalMessage.success('数据刷新成功')
+  // 失败提示由 refresh 内部弹出，这里只在真的成功时才报成功。
+  const handleRefresh = async () => {
+    if (await refresh(true)) globalMessage.success('数据刷新成功')
   }
 
   return {

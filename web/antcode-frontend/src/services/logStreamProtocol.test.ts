@@ -8,6 +8,9 @@ const logLinePayload = (data: Record<string, unknown>) => ({ type: 'log_line', d
 
 describe('isValidStreamPayload log_line 容错读', () => {
   it('已知 log_type 保持通过', () => {
+    // 先钉住集合非空：KNOWN_LOG_TYPES 是从生产模块导入的，被清空的话下面这个循环
+    // 一条断言都不执行，"全通过"和"根本没校验"会长得一样。
+    expect(KNOWN_LOG_TYPES.size).toBe(4)
     for (const logType of KNOWN_LOG_TYPES) {
       expect(isValidStreamPayload('log_line', logLinePayload({ content: 'x', log_type: logType }))).toBe(true)
     }

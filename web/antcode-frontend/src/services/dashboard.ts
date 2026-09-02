@@ -50,13 +50,21 @@ export interface DashboardStats {
     success: number
     failed: number
   }
-  system: {
-    status: 'normal' | 'warning' | 'error'
-    uptime: number
-    memory_usage?: number
-    cpu_usage?: number
-    disk_usage?: number
-  }
+}
+
+// 'unknown' = 系统指标没拿到（未加载完，或普通用户对 /dashboard/metrics 拿 403）。
+// 它必须和 'normal' 分开：拿不到指标时报「健康」就是拿故障冒充正常。
+export type SystemHealth = 'normal' | 'warning' | 'error' | 'unknown'
+
+/** 系统健康度。阈值口径只有这一处，Dashboard 的健康灯直接用它。 */
+export const systemHealthFromMetrics = (metrics: SystemMetrics | null): SystemHealth => {
+  if (!metrics) return 'unknown'
+  const cpu = metrics.cpu_usage?.percent ?? 0
+  const memory = metrics.memory_usage?.percent ?? 0
+  const disk = metrics.disk_usage?.percent ?? 0
+  if (cpu > 90 || memory > 90 || disk > 95) return 'error'
+  if (cpu > 70 || memory > 70 || disk > 85) return 'warning'
+  return 'normal'
 }
 
 export interface SystemMetrics {
@@ -141,7 +149,7 @@ class DashboardService extends BaseService {
   }
 
   // 摘要对所有登录用户可用；管理员系统指标是可选增强，不能阻断摘要。
-  async getDashboardStats(metrics?: SystemMetrics): Promise<DashboardStats> {
+  async getDashboardStats(): Promise<DashboardStats> {
     const summary = await this.get<DashboardSummaryPayload>('/dashboard/summary')
 
     return {
@@ -157,30 +165,7 @@ class DashboardService extends BaseService {
         success: summary.tasks?.by_status?.success ?? 0,
         failed: summary.tasks?.by_status?.failed ?? 0,
       },
-      system: {
-        status: metrics ? this.calculateSystemStatus(metrics) : 'normal',
-        uptime: metrics?.uptime ?? 0,
-        memory_usage: metrics?.memory_usage?.percent,
-        cpu_usage: metrics?.cpu_usage?.percent,
-        disk_usage: metrics?.disk_usage?.percent,
-      },
     }
-  }
-
-  // 计算系统状态
-  private calculateSystemStatus(metrics: SystemMetrics): 'normal' | 'warning' | 'error' {
-    // 基于CPU、内存和磁盘使用率判断系统状态
-    const cpuUsage = metrics.cpu_usage?.percent || 0
-    const memoryUsage = metrics.memory_usage?.percent || 0
-    const diskUsage = metrics.disk_usage?.percent || 0
-
-    if (cpuUsage > 90 || memoryUsage > 90 || diskUsage > 95) {
-      return 'error'
-    } else if (cpuUsage > 70 || memoryUsage > 70 || diskUsage > 85) {
-      return 'warning'
-    }
-
-    return 'normal'
   }
 
   // 刷新系统指标缓存（同样做字段映射）
