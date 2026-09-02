@@ -3725,7 +3725,7 @@
       "path": "web/antcode-frontend/src/pages/Dashboard/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 548
+      "value": 528
     },
     {
       "path": "web/antcode-frontend/src/pages/Projects/ProjectList.tsx",

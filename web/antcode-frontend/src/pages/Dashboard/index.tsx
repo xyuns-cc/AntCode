@@ -13,38 +13,13 @@ import SpiderStatsTab from '@/components/workers/SpiderStatsTab'
 import StatCard from '@/components/common/StatCard'
 import PageContainer from '@/components/common/PageContainer'
 import { successRateView } from '@/utils/spiderSuccessRate'
+import ResourceBar from './ResourceBar'
 
 const MonitorTab = React.lazy(() => import('@/pages/Monitor'))
 const { Title, Text } = Typography
 
 // 自动刷新间隔（毫秒）
 const AUTO_REFRESH_INTERVAL = 30000
-
-// 资源进度条组件
-interface ResourceBarProps {
-  label: string
-  value: number
-  color: string
-}
-
-const ResourceBar: React.FC<ResourceBarProps> = memo(({ label, value, color }) => {
-  const { token } = theme.useToken()
-  return (
-    <div style={{ marginBottom: 16 }}>
-      <Flex justify="space-between" style={{ marginBottom: 6 }}>
-        <Text style={{ fontSize: 13 }}>{label}</Text>
-        <Text strong style={{ fontSize: 13 }}>{value}%</Text>
-      </Flex>
-      <Progress
-        percent={value}
-        showInfo={false}
-        strokeColor={color}
-        trailColor={token.colorFillSecondary}
-        size="small"
-      />
-    </div>
-  )
-})
 
 const Dashboard: React.FC = memo(() => {
   const { token } = theme.useToken()
