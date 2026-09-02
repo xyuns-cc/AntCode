@@ -1391,7 +1391,7 @@
       "path": "services/worker/src/antcode_worker/engine/engine.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1597
+      "value": 1596
     },
     {
       "path": "services/worker/src/antcode_worker/engine/engine.py",

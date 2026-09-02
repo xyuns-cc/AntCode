@@ -965,7 +965,6 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             run_id=context.run_id,
             task_id=context.task_id,
             status="running",
-            exit_code=0,
             error_message="",
             started_at=started_at,
             finished_at=None,
@@ -1003,7 +1002,7 @@ class Engine(FatalErrorMixin, WorkerMetricsRecorderMixin):
             run_id=context.run_id,
             task_id=context.task_id,
             status=result.status.value,
-            exit_code=result.exit_code or 0,
+            exit_code=result.exit_code,  # 准备阶段失败没有退出码；折成 0 会与"真的退出 0"同信号
             error_message=normalize_persisted_error_message(result.error_message) or "",
             started_at=result.started_at,
             finished_at=result.finished_at,

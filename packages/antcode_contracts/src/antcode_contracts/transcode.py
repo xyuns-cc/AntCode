@@ -166,7 +166,7 @@ def encode_task_status(
     task_id: str,
     worker_id: str,
     status: str,
-    exit_code: int = 0,
+    exit_code: int | None = None,
     error_message: str = "",
     started_at: datetime | None = None,
     finished_at: datetime | None = None,
@@ -176,6 +176,8 @@ def encode_task_status(
     """构造 ``data_pb2.TaskStatus``。
 
     * ``status`` 接受字符串别名（``success`` / ``failed`` / ...）。
+    * ``exit_code=None`` = 没有进程退出码（还在跑，或压根没跑起来），字段缺席；
+      ``0`` 是"进程真的退出 0"，两者不可互换。
     * ``data`` 是 ``map<string,string>``：值非 ``(str|int|float|bool)``
       时会用 ``json.dumps`` fallback。
     * 不在此处注入 trace —— trace 由调用方在出站点 ``inject_trace`` 显式
@@ -186,10 +188,11 @@ def encode_task_status(
         task_id=task_id or "",
         worker_id=worker_id or "",
         status=status_str_to_proto(status),
-        exit_code=int(exit_code or 0),
         error_message=error_message or "",
         duration_ms=int(duration_ms or 0),
     )
+    if exit_code is not None:
+        msg.exit_code = int(exit_code)
     started_ts = datetime_to_proto_timestamp(started_at)
     if started_ts is not None:
         msg.started_at.CopyFrom(started_ts)
@@ -221,7 +224,7 @@ def task_status_to_dict(ts: data_pb2.TaskStatus) -> dict[str, Any]:
         "task_id": ts.task_id or "",
         "worker_id": ts.worker_id or "",
         "status": proto_status_to_str(ts.status),
-        "exit_code": int(ts.exit_code or 0),
+        "exit_code": int(ts.exit_code) if ts.HasField("exit_code") else None,
         "error_message": ts.error_message or "",
         "started_at": proto_timestamp_to_datetime(ts.started_at if ts.HasField("started_at") else None),
         "finished_at": proto_timestamp_to_datetime(ts.finished_at if ts.HasField("finished_at") else None),

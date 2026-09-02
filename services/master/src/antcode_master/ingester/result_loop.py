@@ -268,7 +268,7 @@ class ResultLoop:
         return await task_run_service.update_result_outcome(
             run_id=task_status.run_id,
             status=proto_status_to_str(task_status.status),
-            exit_code=task_status.exit_code,
+            exit_code=task_status.exit_code if task_status.HasField("exit_code") else None,
             error_message=task_status.error_message or "",
             started_at=started_at,
             finished_at=finished_at,

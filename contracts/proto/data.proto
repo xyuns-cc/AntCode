@@ -123,7 +123,10 @@ message TaskStatus {
   string task_id = 2;
   string worker_id = 3;
   Status status = 4;
-  int32 exit_code = 5;
+  // optional = 显式 presence：任务还没退出（RUNNING）或根本没跑起来（拉包 /
+  // 运行时准备失败）时字段缺席。少了 presence，proto3 默认值会把"没有退出码"
+  // 编成 0，与"进程真的退出 0"无法区分。
+  optional int32 exit_code = 5;
   string error_message = 6;
   Timestamp started_at = 7;
   Timestamp finished_at = 8;

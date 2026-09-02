@@ -148,7 +148,7 @@ class TaskStatusEncoder:
             task_id=result.task_id or "",
             worker_id=worker_id or "",
             status=result.status,
-            exit_code=int(result.exit_code or 0),
+            exit_code=result.exit_code,
             error_message=normalize_persisted_error_message(result.error_message) or "",
             started_at=result.started_at,
             finished_at=result.finished_at,

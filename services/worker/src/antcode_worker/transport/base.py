@@ -100,7 +100,7 @@ class TaskResult:
     run_id: str
     task_id: str
     status: str  # success, failed, cancelled, timeout
-    exit_code: int = 0
+    exit_code: int | None = None  # None = 无进程退出码（还在跑/没跑起来）；0 = 真的退出 0
     error_message: str = ""
     started_at: datetime | None = None
     finished_at: datetime | None = None
