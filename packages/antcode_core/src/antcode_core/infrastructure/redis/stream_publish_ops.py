@@ -88,26 +88,6 @@ class StreamPublishMixin(StreamSession):
             deleted_fence_key=deleted_fence_key,
         )
 
-    async def xadd_unique(
-        self,
-        stream_key: str,
-        dedup_key: str,
-        *,
-        deleted_fence_key: str,
-        fingerprint: str,
-        data: dict,
-    ) -> str | None:
-        """Atomically append one previously unseen fingerprint in the same slot."""
-        client = await self._get_client()
-        return await crawl_stream_ops.xadd_unique(
-            client,
-            stream_key,
-            dedup_key,
-            deleted_fence_key=deleted_fence_key,
-            fingerprint=fingerprint,
-            data=data,
-        )
-
     async def xadd_typed(
         self,
         stream_key: str,

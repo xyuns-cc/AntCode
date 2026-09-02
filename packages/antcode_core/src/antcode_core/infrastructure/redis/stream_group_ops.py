@@ -7,7 +7,6 @@
 
 from loguru import logger
 
-from antcode_core.infrastructure.redis import crawl_stream_operations as crawl_stream_ops
 from antcode_core.infrastructure.redis.stream_session import StreamSession
 
 # Redis 对不存在的 Stream 键执行 XGROUP DESTROY 时返回的错误片段（已小写化比较）
@@ -85,22 +84,6 @@ class StreamGroupMixin(StreamSession):
             group_name: 消费者组名称（必填）
         """
         return await self.xgroup_create(stream_key, group_name, mkstream=True)
-
-    async def ensure_active_group(
-        self,
-        stream_key: str,
-        group_name: str,
-        *,
-        deleted_fence_key: str,
-    ) -> bool:
-        """仅当项目未被删除时建组（Crawl 删除 fence 由 Lua 原子校验）。"""
-        client = await self._get_client()
-        return await crawl_stream_ops.ensure_active_group(
-            client,
-            stream_key,
-            group_name,
-            deleted_fence_key=deleted_fence_key,
-        )
 
 
 __all__ = ["MISSING_STREAM_KEY_ERROR", "StreamGroupMixin"]

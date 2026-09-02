@@ -44,7 +44,6 @@ class StreamReadMixin(StreamGroupMixin):
         count: int,
         block_ms: int | None,
         read_pending: bool,
-        active_fence_key: str | None = None,
     ) -> Any:
         """执行一次单 Stream XREADGROUP；组不存在时补建并返回 None。"""
         client = await self._get_client()
@@ -59,10 +58,7 @@ class StreamReadMixin(StreamGroupMixin):
         except Exception as e:
             if "NOGROUP" not in str(e):
                 raise
-            if active_fence_key is None:
-                await self.ensure_group(stream_key, group_name)
-            else:
-                await self.ensure_active_group(stream_key, group_name, deleted_fence_key=active_fence_key)
+            await self.ensure_group(stream_key, group_name)
             return None
 
     async def _read_multi(
@@ -99,7 +95,6 @@ class StreamReadMixin(StreamGroupMixin):
         count: int = DEFAULT_READ_COUNT,
         block_ms: int | None = None,
         read_pending: bool = False,
-        active_fence_key: str | None = None,
     ) -> list[StreamMessage]:
         """从消费者组读取消息
 
@@ -110,7 +105,6 @@ class StreamReadMixin(StreamGroupMixin):
             count: 读取数量
             block_ms: 阻塞等待毫秒数，None 表示不阻塞
             read_pending: 是否读取 pending 消息（使用 "0" 而非 ">"）
-            active_fence_key: Crawl 删除 fence 键，传入后补建组走 fence 校验
 
         Returns:
             StreamMessage 列表
@@ -122,7 +116,6 @@ class StreamReadMixin(StreamGroupMixin):
             count=count,
             block_ms=block_ms,
             read_pending=read_pending,
-            active_fence_key=active_fence_key,
         )
         return parse_xread_result(result)
 

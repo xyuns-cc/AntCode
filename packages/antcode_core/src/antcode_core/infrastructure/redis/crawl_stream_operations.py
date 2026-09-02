@@ -33,18 +33,6 @@ if ttl and ttl > 0 then redis.call("EXPIRE", KEYS[2], ttl) end
 return new_id
 """
 
-_XADD_UNIQUE_SCRIPT = """
-if redis.call('EXISTS', KEYS[3]) == 1 then
-    return redis.error_reply('CRAWL_PROJECT_DELETED')
-end
-if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then return false end
-local args = {KEYS[1], '*'}
-for index = 2, #ARGV do table.insert(args, ARGV[index]) end
-local message_id = redis.call('XADD', unpack(args))
-redis.call('SADD', KEYS[2], ARGV[1])
-return message_id
-"""
-
 _XADD_ACTIVE_BATCH_SCRIPT = """
 if redis.call('EXISTS', KEYS[2]) == 1 then
     return redis.error_reply('CRAWL_PROJECT_DELETED')
@@ -62,18 +50,6 @@ for message = 1, tonumber(ARGV[1]) do
     table.insert(ids, redis.call('XADD', unpack(args)))
 end
 return ids
-"""
-
-_ENSURE_ACTIVE_GROUP_SCRIPT = """
-if redis.call('EXISTS', KEYS[2]) == 1 then
-    return redis.error_reply('CRAWL_PROJECT_DELETED')
-end
-local result = redis.pcall('XGROUP', 'CREATE', KEYS[1], ARGV[1], '0', 'MKSTREAM')
-if type(result) == 'table' and result.err then
-    if string.find(result.err, 'BUSYGROUP', 1, true) then return 0 end
-    return redis.error_reply(result.err)
-end
-return 1
 """
 
 _ACK_DELETE_SCRIPT = """
@@ -110,46 +86,6 @@ async def xadd_batch_active(
         *arguments,
     )
     return [_decode_text(message_id) for message_id in result]
-
-
-async def xadd_unique(
-    redis_client: Any,
-    stream_key: str,
-    dedup_key: str,
-    *,
-    deleted_fence_key: str,
-    fingerprint: str,
-    data: dict,
-) -> str | None:
-    result = await redis_client.eval(
-        _XADD_UNIQUE_SCRIPT,
-        3,
-        stream_key,
-        dedup_key,
-        deleted_fence_key,
-        fingerprint,
-        *_serialize_fields(data),
-    )
-    if not result:
-        return None
-    return _decode_text(result)
-
-
-async def ensure_active_group(
-    redis_client: Any,
-    stream_key: str,
-    group_name: str,
-    *,
-    deleted_fence_key: str,
-) -> bool:
-    result = await redis_client.eval(
-        _ENSURE_ACTIVE_GROUP_SCRIPT,
-        2,
-        stream_key,
-        deleted_fence_key,
-        group_name,
-    )
-    return int(result) in {0, 1}
 
 
 async def xack_delete(

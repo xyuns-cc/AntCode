@@ -34,28 +34,10 @@ async def test_xadd_batch_active_preserves_fenced_lua_arguments() -> None:
     )
 
 
-@pytest.mark.asyncio
-async def test_ensure_active_group_preserves_fenced_lua_arguments() -> None:
-    redis = AsyncMock()
-    redis.eval.return_value = 0
-
-    assert (
-        await StreamClient(redis).ensure_active_group(
-            "{p}:stream",
-            "group",
-            deleted_fence_key="{p}:deleted",
-        )
-        is True
-    )
-    assert redis.eval.await_args.args[1:] == (
-        2,
-        "{p}:stream",
-        "{p}:deleted",
-        "group",
-    )
-
-
-def test_xreadgroup_active_fence_is_keyword_only() -> None:
-    parameter = inspect.signature(StreamClient.xreadgroup).parameters["active_fence_key"]
-
-    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+def test_the_crawl_delete_fence_no_longer_reaches_the_read_path() -> None:
+    """``xreadgroup`` 的 ``active_fence_key`` 与它唯一到达的 ``ensure_active_group``
+    已随 Crawl 队列一起删除；补建组只剩 ``ensure_group`` 一条路。留着这条断言是为了
+    让"又有人把 fence 参数加回读路径"必须先改这里。"""
+    assert "active_fence_key" not in inspect.signature(StreamClient.xreadgroup).parameters
+    assert not hasattr(StreamClient, "ensure_active_group")
+    assert not hasattr(StreamClient, "xadd_unique")

@@ -10,6 +10,34 @@
 
 两者签名一致、名字一致，改错副本的成本极高。这里对 core 版本的所有生产调用点
 做结构性断言：不许裸构造。写死一次具体调用点没有意义——被绕开只是时间问题。
+
+八个 ``spider_*``：**判定不收敛**，理由记在这里
+--------------------------------------------------
+
+两侧的八个 ``spider_*`` 输出逐字节相同，且两边都活：Worker 侧写
+（``plugins/spider/data/reader.py`` / ``reporter.py``），Gateway 与 web_api 侧读
+（``handlers/spider_data.py``、``workers_direct_spider.py``、``crawl_item_stream.py``、
+``run_spider_items.py``）。写方和读方分居两个类，格式漂移的后果是静默空读——所以本
+模块加了逐字节交叉断言，把漂移变成会红的。**但不合并**：
+
+1. 正确的收敛形状是把八个格式提到 ``control_plane`` 做模块级函数（Worker 侧的
+   ``task_ready_stream`` / ``log_stream`` / ``heartbeat_key`` 等八个方法已经是这个
+   形状：本地类只留 namespace 绑定，格式归共享函数）。那要同时改
+   ``services/worker/``；只改一边会变成三份实现，比现在更糟。
+2. 收敛的前置条件"统一默认值语义"本身有坑。Worker 侧的
+   ``DEFAULT_NAMESPACE: ClassVar[str] = redis_namespace()`` 与
+   ``RedisKeyConfig.namespace: str = redis_namespace()`` 都在**类体/字段默认值**求值，
+   是**导入期快照**而不是"跟随"：实测 ``import antcode_worker.transport.redis.keys``
+   在没有 DATABASE_URL 的进程里直接抛 Settings 校验错，正是 ``settings_ref``
+   那套惰性解析要避免的形状。照它收敛是把这个 bug 传播过去。
+3. core 侧那个硬编码 ``"antcode"`` **当前不会**指向错误键空间：全部生产构造点都显式
+   传 namespace（下面那条 AST 断言在盯），且 ``Settings.REDIS_NAMESPACE`` 有
+   ``min_length=1`` 与 ``^[A-Za-z0-9][A-Za-z0-9:_-]*$``，所以
+   ``RedisKeys(settings.REDIS_NAMESPACE)`` 与 ``RedisKeys(redis_namespace())`` 恒等。
+   它是给未来调用方留的陷阱，不是现存的错键空间——"先修默认值再收敛"的前提不成立。
+
+先例：``RetryService`` 两侧同名却是两个东西，上一轮只合并了队列后端。同名不是合并
+理由，"两边都得改才能收敛"也不是本轮能付的代价。
 """
 
 from __future__ import annotations
@@ -22,6 +50,17 @@ CORE_KEYS_MODULES = (
     "antcode_core.infrastructure.redis",
 )
 SOURCE_ROOTS = (Path("packages"), Path("services"))
+# 两侧同名同签名、且都活着的那八个；``spider_dedup`` 不在内，它只有 antcode_scrapy 一份。
+SPIDER_KEY_METHODS = (
+    "spider_data_stream",
+    "spider_meta_key",
+    "spider_item_ids_key",
+    "spider_item_order_key",
+    "spider_tombstone_key",
+    "spider_index_key",
+    "spider_index_expiry_key",
+    "spider_config_key",
+)
 
 
 def _imports_core_redis_keys(tree: ast.AST) -> bool:
@@ -104,3 +143,22 @@ def test_core_redis_keys_does_not_shadow_the_task_plane_key_names() -> None:
 
     assert [name for name in task_plane if hasattr(WorkerRedisKeys, name)] == list(task_plane)
     assert [name for name in task_plane if hasattr(CoreRedisKeys, name)] == []
+
+
+def test_both_spider_key_implementations_stay_byte_identical() -> None:
+    """判定不收敛之后，唯一还能防住漂移的东西：逐字节交叉断言。
+
+    写方（Worker）与读方（Gateway / web_api）用的是两个类。任何一侧单独改格式，
+    生产上的表现是读到空数据、不报错，与"这次运行确实没抓到东西"逐字节相同。
+    带非默认 namespace 的那一组同时钉住 hash tag 的位置——``{ns}`` 括在哪里错了，
+    Redis Cluster 上就是跨 slot 的 Lua 直接失败。
+    """
+    from antcode_core.infrastructure.redis.keys import RedisKeys as CoreRedisKeys
+    from antcode_worker.transport.redis.keys import RedisKeys as WorkerRedisKeys
+
+    for namespace in ("antcode", "tenant-a"):
+        core = CoreRedisKeys(namespace)
+        worker = WorkerRedisKeys(namespace)
+        produced = {name: (getattr(core, name)("id-1"), getattr(worker, name)("id-1")) for name in SPIDER_KEY_METHODS}
+        drifted = {name: pair for name, pair in produced.items() if pair[0] != pair[1]}
+        assert not drifted, f"两份 spider key 实现已漂移（namespace={namespace}）: {drifted}"
