@@ -31,8 +31,14 @@ WIRE_CONTRACT_CAPABILITY = "wire_contract"
 
 #: 本次发布的契约版本：hash-tag ready key + 密文 ready 帧 + HMAC v2 + Lease ttl_ms
 #: (v2)，外加运行时控制失败回包的 ``data`` 必须携带结构化 ``error_code`` (v3)，
-#: 再加心跳 ``Metrics`` 新增生效单任务限额 20/21 号字段 (v4)。
-WORKER_WIRE_CONTRACT_VERSION = 4
+#: 再加心跳 ``Metrics`` 新增生效单任务限额 20/21 号字段 (v4)，
+#: 再加 ``TaskStatus.exit_code`` 改为 explicit presence (v5)。
+#:
+#: v5 是一次静默的语义断裂，不是"连不上"：proto3 无 ``optional`` 时零值不上线，
+#: 所以旧 Worker 报"进程真的退出 0"时字段缺席，新控制面按 ``HasField`` 读成
+#: "没有退出码"，一次成功会被记成控制面判的失败。正是这份文档开头说的那种
+#: "连得上却在撒谎"，所以必须靠版本号拒发 Lease 而不是靠运气对齐。
+WORKER_WIRE_CONTRACT_VERSION = 5
 
 
 class WorkerWireContractError(RuntimeError):
