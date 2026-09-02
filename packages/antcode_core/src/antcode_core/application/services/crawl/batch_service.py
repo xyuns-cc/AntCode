@@ -13,7 +13,6 @@ from loguru import logger
 from tortoise.transactions import in_transaction
 
 from antcode_core.application.services.base import BaseService
-from antcode_core.application.services.crawl.dedup_service import CrawlDedupService, crawl_dedup_service
 from antcode_core.application.services.crawl.progress_service import (
     CrawlProgressService,
     crawl_progress_service,
@@ -55,20 +54,14 @@ class CrawlBatchService(BaseService):
     需求: 1.1, 1.2, 1.3, 1.4, 1.5
     """
 
-    def __init__(
-        self,
-        progress_service: CrawlProgressService | None = None,
-        dedup_service: CrawlDedupService | None = None,
-    ):
+    def __init__(self, progress_service: CrawlProgressService | None = None):
         """初始化批次管理服务
 
         Args:
             progress_service: 进度服务，为 None 时使用全局实例
-            dedup_service: 去重服务，为 None 时使用全局实例
         """
         super().__init__()
         self._progress_service = progress_service or crawl_progress_service
-        self._dedup_service = dedup_service or crawl_dedup_service
 
     async def _publish_batch_event(
         self,

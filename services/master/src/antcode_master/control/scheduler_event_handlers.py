@@ -49,11 +49,9 @@ async def cleanup_crawl_project(data: dict) -> None:
     request = CrawlProjectCleanupRequest(project_id, tuple(batch_ids))
     report = await crawl_project_redis_cleanup.cleanup(request)
     logger.info(
-        "outbox 驱动 Crawl 项目清理完成: project={} batches={} keys_deleted={} fences={}",
+        "outbox 驱动 Crawl 项目清理完成: project={} batches={}",
         report.project_id,
         report.batch_count,
-        report.project_keys_deleted,
-        report.cancel_fences_retained,
     )
 
 

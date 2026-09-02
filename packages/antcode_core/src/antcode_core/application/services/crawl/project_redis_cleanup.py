@@ -10,11 +10,6 @@ from antcode_core.application.services.crawl.backends.redis_progress import Redi
 from antcode_core.infrastructure.redis.client import get_redis_client
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
 
-_FENCE_PROJECT_AND_CLEAR = """
-redis.call('SET', KEYS[1], '1')
-return redis.call('DEL', unpack(KEYS, 2))
-"""
-
 
 @dataclass(frozen=True)
 class CrawlProjectCleanupRequest:
@@ -34,9 +29,6 @@ class CrawlProjectCleanupRequest:
 class CrawlProjectCleanupReport:
     project_id: str
     batch_count: int
-    project_keys_deleted: int
-    project_fence_retained: bool
-    cancel_fences_retained: int
 
 
 class CrawlProjectRedisCleanup:
@@ -46,48 +38,19 @@ class CrawlProjectRedisCleanup:
 
     async def cleanup(self, request: CrawlProjectCleanupRequest) -> CrawlProjectCleanupReport:
         redis = await self._client()
-        project_keys = self._project_keys(request.project_id)
-        deleted = int(
-            await redis.eval(
-                _FENCE_PROJECT_AND_CLEAR,
-                len(project_keys) + 1,
-                redis_keys.crawl_project_deleted_key(request.project_id, self._namespace),
-                *project_keys,
-            )
-        )
         progress = RedisProgressStore(redis_client=redis, namespace=self._namespace)
         for batch_id in request.batch_ids:
             await progress.fence_and_clear(request.project_id, batch_id)
-        await self._verify(redis, request, project_keys)
+            await self._verify_batch(redis, request.project_id, batch_id)
         return CrawlProjectCleanupReport(
             project_id=request.project_id,
             batch_count=len(request.batch_ids),
-            project_keys_deleted=deleted,
-            project_fence_retained=True,
-            cancel_fences_retained=len(request.batch_ids),
         )
 
     async def _client(self) -> Any:
         if self._redis is None:
             self._redis = await get_redis_client()
         return self._redis
-
-    def _project_keys(self, project_id: str) -> tuple[str, ...]:
-        return (redis_keys.crawl_dedup_key(project_id, self._namespace),)
-
-    async def _verify(
-        self,
-        redis: Any,
-        request: CrawlProjectCleanupRequest,
-        project_keys: tuple[str, ...],
-    ) -> None:
-        if int(await redis.exists(*project_keys)) != 0:
-            raise RuntimeError(f"Crawl 项目 Redis key 清理复核失败: project={request.project_id}")
-        project_fence = redis_keys.crawl_project_deleted_key(request.project_id, self._namespace)
-        if int(await redis.exists(project_fence)) != 1:
-            raise RuntimeError(f"Crawl 项目删除 fence 复核失败: project={request.project_id}")
-        for batch_id in request.batch_ids:
-            await self._verify_batch(redis, request.project_id, batch_id)
 
     async def _verify_batch(self, redis: Any, project_id: str, batch_id: str) -> None:
         active_keys = (

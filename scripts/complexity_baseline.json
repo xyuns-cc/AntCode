@@ -155,7 +155,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 694
+      "value": 687
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/batch_service.py",
@@ -185,7 +185,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 881
+      "value": 877
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",

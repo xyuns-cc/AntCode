@@ -5,11 +5,6 @@ from __future__ import annotations
 from antcode_core.infrastructure.redis.control_plane import redis_namespace
 
 
-def crawl_project_tag(project_id: str, namespace: str | None = None) -> str:
-    """Return the Cluster hash tag shared by one project's Crawl keys."""
-    return f"{{{redis_namespace(namespace)}:crawl:{project_id}}}"
-
-
 def crawl_batch_tag(
     project_id: str,
     batch_id: str,
@@ -51,14 +46,6 @@ def crawl_cancel_fence_key(
     return f"{crawl_batch_tag(project_id, batch_id, namespace)}:cancelled"
 
 
-def crawl_dedup_key(project_id: str, namespace: str | None = None) -> str:
-    return f"{crawl_project_tag(project_id, namespace)}:dedup"
-
-
-def crawl_project_deleted_key(project_id: str, namespace: str | None = None) -> str:
-    return f"{crawl_project_tag(project_id, namespace)}:deleted"
-
-
 def crawl_worker_registry_key(namespace: str | None = None) -> str:
     return f"{redis_namespace(namespace)}:crawl:workers:registry"
 
@@ -76,10 +63,7 @@ __all__ = [
     "crawl_batch_workers_key",
     "crawl_checkpoint_key",
     "crawl_cancel_fence_key",
-    "crawl_dedup_key",
     "crawl_progress_key",
-    "crawl_project_deleted_key",
-    "crawl_project_tag",
     "crawl_test_result_key",
     "crawl_worker_registry_key",
     "crawl_workers_key",

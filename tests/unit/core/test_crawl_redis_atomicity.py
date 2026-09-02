@@ -5,9 +5,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-from antcode_core.application.services.crawl.backends.redis_dedup import (
-    RedisDedupStore,
-)
 from antcode_core.application.services.crawl.backends.redis_keys import (
     crawl_batch_workers_key,
     crawl_test_result_key,
@@ -42,9 +39,6 @@ def test_crawl_keys_include_namespace_and_share_aggregate_slots() -> None:
     ]
 
     assert {_hash_tag(key) for key in progress_keys} == {"tenant-a:crawl:project-1:batch-1"}
-    assert (
-        RedisDedupStore(AsyncMock(), namespace="tenant-a")._key("project-1").startswith("{tenant-a:crawl:project-1}:")
-    )
     assert crawl_worker_registry_key("tenant-a") == "tenant-a:crawl:workers:registry"
     assert crawl_batch_workers_key("batch-1", "tenant-a") == "tenant-a:crawl:batch:batch-1:workers"
     assert crawl_test_result_key("batch-1", "tenant-a") == "tenant-a:crawl:test:result:batch-1"

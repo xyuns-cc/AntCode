@@ -2,7 +2,7 @@ import inspect
 from pathlib import Path
 
 import pytest
-from antcode_core.application.services.crawl.backends import dedup_backend, progress_backend
+from antcode_core.application.services.crawl.backends import progress_backend
 from antcode_core.domain.schemas.project import (
     FileInfo,
     ProjectCodeCreateRequest,
@@ -20,14 +20,10 @@ REPO_ROOT = Path(__file__).parents[3]
 
 
 def test_crawl_state_backends_reject_process_memory(monkeypatch):
-    monkeypatch.setenv("DEDUP_BACKEND", "memory")
     monkeypatch.setenv("PROGRESS_BACKEND", "memory")
     monkeypatch.delenv("CRAWL_BACKEND", raising=False)
-    dedup_backend.reset_dedup_store()
     progress_backend.reset_progress_store()
 
-    with pytest.raises(ValueError, match="Redis"):
-        dedup_backend.get_dedup_store()
     with pytest.raises(ValueError, match="Redis"):
         progress_backend.get_progress_store()
 

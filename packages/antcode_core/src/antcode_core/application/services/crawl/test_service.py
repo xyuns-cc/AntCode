@@ -18,7 +18,6 @@ from loguru import logger
 from antcode_core.application.services.base import BaseService
 from antcode_core.application.services.crawl.backends.redis_keys import crawl_test_result_key
 from antcode_core.application.services.crawl.batch_service import CrawlBatchService, crawl_batch_service
-from antcode_core.application.services.crawl.dedup_service import CrawlDedupService, crawl_dedup_service
 from antcode_core.application.services.crawl.progress_service import (
     CrawlProgressService,
     crawl_progress_service,
@@ -155,19 +154,16 @@ class CrawlTestService(BaseService):
         self,
         batch_service: CrawlBatchService | None = None,
         progress_service: CrawlProgressService | None = None,
-        dedup_service: CrawlDedupService | None = None,
     ):
         """初始化测试执行服务
 
         Args:
             batch_service: 批次管理服务，为 None 时使用全局实例
             progress_service: 进度服务，为 None 时使用全局实例
-            dedup_service: 去重服务，为 None 时使用全局实例
         """
         super().__init__()
         self._batch_service = batch_service or crawl_batch_service
         self._progress_service = progress_service or crawl_progress_service
-        self._dedup_service = dedup_service or crawl_dedup_service
 
         # 存储测试结果（内存缓存）
         self._test_results: dict[str, CrawlTestResult] = {}

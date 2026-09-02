@@ -1,22 +1,9 @@
 import pytest
-from antcode_core.application.services.crawl.backends.redis_dedup import RedisDedupStore
 from antcode_core.application.services.scheduler.outbox_service import scheduler_outbox_service
 from antcode_core.application.services.scheduler.scheduler_service import SchedulerService
 from antcode_core.infrastructure.redis.locks import DistributedLock, FencingTokenManager
 from antcode_core.infrastructure.redis.rate_limiter import RedisRateLimiter
 from antcode_core.infrastructure.redis.stream_client import StreamClient
-
-
-class _DedupRedis:
-    def __init__(self, error=None):
-        self.error = error
-        self.commands = []
-
-    async def eval(self, *_args):
-        if self.error:
-            raise self.error
-        self.commands.append("eval_sadd")
-        return 1
 
 
 class _BrokenStreamRedis:
@@ -57,23 +44,6 @@ class _BrokenLockRedis:
 class _MissingTokenRedis:
     async def get(self, *_args):
         return None
-
-
-@pytest.mark.asyncio
-async def test_crawl_dedup_uses_standard_redis_set():
-    redis = _DedupRedis()
-    store = RedisDedupStore(redis, namespace="test")
-
-    assert await store.add("project", "item-1") is True
-    assert redis.commands == ["eval_sadd"]
-
-
-@pytest.mark.asyncio
-async def test_crawl_dedup_failure_is_exposed():
-    store = RedisDedupStore(_DedupRedis(RuntimeError("redis set failed")))
-
-    with pytest.raises(RuntimeError, match="redis set failed"):
-        await store.add("project", "item-1")
 
 
 @pytest.mark.asyncio

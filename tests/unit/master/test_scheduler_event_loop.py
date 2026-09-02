@@ -194,8 +194,6 @@ async def test_crawl_project_cleanup_event_runs_idempotent_primitive(monkeypatch
         return_value=SimpleNamespace(
             project_id="project-1",
             batch_count=2,
-            project_keys_deleted=5,
-            cancel_fences_retained=2,
         )
     )
     monkeypatch.setattr(project_redis_cleanup.crawl_project_redis_cleanup, "cleanup", cleanup)
