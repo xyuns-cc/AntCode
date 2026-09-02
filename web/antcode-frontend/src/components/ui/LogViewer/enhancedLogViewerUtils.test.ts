@@ -43,7 +43,12 @@ describe('enhancedLogViewerUtils', () => {
   it('默认类型集合覆盖后端全部 LogType，收窄过滤器不会永久丢行', () => {
     // DEFAULT_TYPES 曾只有 stdout/stderr：system/application 在"过滤生效"时被整行丢弃，
     // 而类型选择器里没有任何能把它们选回来的选项 —— 丢掉的行不可恢复。
-    expect([...DEFAULT_TYPES].sort()).toEqual(Object.keys(LOG_TYPE_LABELS).sort())
+    //
+    // 钉字面量集合，不拿 Object.keys(LOG_TYPE_LABELS) 做期望值：DEFAULT_TYPES 就是由它
+    // 派生的（enhancedLogViewerTypes.ts），两者互相比对恒成立 —— 实测把 LOG_TYPE_LABELS
+    // 砍成两项，这一行照样绿。字面量则逼着「后端 LogType 变了」成为一次显式修改。
+    expect([...DEFAULT_TYPES].sort()).toEqual(['application', 'stderr', 'stdout', 'system'])
+    expect(Object.keys(LOG_TYPE_LABELS).sort()).toEqual(['application', 'stderr', 'stdout', 'system'])
 
     const messages = [
       log({ id: 'log-1', type: 'stdout' }),

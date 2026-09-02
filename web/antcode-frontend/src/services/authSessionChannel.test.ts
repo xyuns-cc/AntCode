@@ -14,17 +14,21 @@ import {
   withCrossTabRefreshLock,
 } from './authSessionChannel'
 
-const futureToken = (username = 'alice'): string => {
+// username 与 session_jti 分开给：账号过滤那一支只有在两者不同步时才起作用，
+// 用 `session-${username}` 这种绑死的构造喂不到它。
+const tokenFor = (username: string, sessionJti: string): string => {
   const payload = btoa(
     JSON.stringify({
       exp: Math.floor(Date.now() / 1000) + 3600,
       username,
       token_type: 'access',
-      session_jti: `session-${username}`,
+      session_jti: sessionJti,
     })
   )
   return `header.${payload}.signature`
 }
+
+const futureToken = (username = 'alice'): string => tokenFor(username, `session-${username}`)
 
 class FakeBroadcastChannel {
   static instances: FakeBroadcastChannel[] = []
@@ -53,6 +57,18 @@ class FakeBroadcastChannel {
   private emit(data: unknown): void {
     for (const listener of this.listeners) listener({ data } as MessageEvent)
   }
+}
+
+/** 一个「对端标签页」：收到 token_request 后按顺序回若干个候选令牌。 */
+const respondWith = (tokens: string[]): void => {
+  const peer = new FakeBroadcastChannel('antcode-auth-session')
+  peer.addEventListener('message', (event) => {
+    const request = event.data as { type: string; requestId: string }
+    if (request.type !== 'token_request') return
+    for (const token of tokens) {
+      peer.postMessage({ type: 'token_response', requestId: request.requestId, token })
+    }
+  })
 }
 
 describe('auth session channel', () => {
@@ -114,32 +130,64 @@ describe('auth session channel', () => {
     unsubscribe()
   })
 
-  it('ignores peer tokens belonging to a different account', async () => {
+  /**
+   * 这三条替换掉原来那一条「ignores peer tokens belonging to a different account」。
+   *
+   * 原判据是 `expect(token).not.toBeNull()` + `expect(getAccessToken()).toBe(token)`：后者恒真
+   * ——实现永远把自己选中的那个装进内存——而前者对「收下了别人的令牌」同样成立，于是那条用例
+   * 从来没有验过它标题里写的那件事。实测把 tokenMatchesRequest 整个换成 `return true`，
+   * 全仓 426 条用例一条不红。
+   *
+   * 现在钉的是「装进内存的到底是哪一个」，并把 session_jti 与 username 两道过滤分开钉：
+   * 原来的 fixture 两个候选令牌连 session_jti 都不同，账号那一支根本没被走到。
+   */
+  it('对端先回别的账号、再回本账号时，收下的是本账号那一个', async () => {
     setSessionGeneration('session-new-account')
-    const peer = new FakeBroadcastChannel('antcode-auth-session')
-    peer.addEventListener('message', (event) => {
-      const request = event.data as { type: string; requestId: string }
-      if (request.type === 'token_request') {
-        peer.postMessage({
-          type: 'token_response',
-          requestId: request.requestId,
-          token: futureToken('old-account'),
-        })
-        peer.postMessage({
-          type: 'token_response',
-          requestId: request.requestId,
-          token: futureToken('new-account'),
-        })
-      }
-    })
+    const foreign = futureToken('old-account')
+    const mine = futureToken('new-account')
+    respondWith([foreign, mine])
 
     const token = await requestPeerAccessToken({
       sessionJti: 'session-new-account',
       username: 'new-account',
     })
 
-    expect(token).not.toBeNull()
-    expect(getAccessToken()).toBe(token)
+    expect(token).toBe(mine)
+    expect(getAccessToken()).toBe(mine)
+  })
+
+  it('同一会话标识、同一账号的令牌照常收下', async () => {
+    setSessionGeneration('session-shared')
+    const mine = tokenFor('alice', 'session-shared')
+    respondWith([mine])
+
+    await expect(
+      requestPeerAccessToken({ sessionJti: 'session-shared', username: 'alice' })
+    ).resolves.toBe(mine)
+    expect(getAccessToken()).toBe(mine)
+  })
+
+  it('同一账号但旧会话标识的令牌不收 —— 那是上一次登录留下的', async () => {
+    // 单独钉 session_jti 那一支：上面两条里的候选令牌账号也不同，account 分支先把它挡了，
+    // jti 分支实际没被走到（实测单独删掉它，那两条照样绿）。
+    setSessionGeneration('session-current')
+    respondWith([tokenFor('alice', 'session-previous')])
+
+    await expect(
+      requestPeerAccessToken({ sessionJti: 'session-current', username: 'alice' })
+    ).resolves.toBeNull()
+    expect(getAccessToken()).toBeNull()
+  })
+
+  it('会话标识对得上但账号对不上的令牌一概不收', async () => {
+    // 正是 tokenMatchesRequest 里 username 那一支存在的理由：只按 session_jti 过滤挡不住它。
+    setSessionGeneration('session-shared')
+    respondWith([tokenFor('bob', 'session-shared')])
+
+    await expect(
+      requestPeerAccessToken({ sessionJti: 'session-shared', username: 'alice' })
+    ).resolves.toBeNull()
+    expect(getAccessToken()).toBeNull()
   })
 
   it('rejects a delayed token update after the shared generation is cleared', () => {
