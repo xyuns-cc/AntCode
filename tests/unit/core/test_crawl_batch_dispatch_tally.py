@@ -70,5 +70,5 @@ def test_fully_successful_dispatch_stays_informational(dispatch_log_lines) -> No
 
     level, message = _dispatch_summary(dispatch_log_lines)
     assert "dispatched=2" in message
-    assert "already_dispatched=0 redispatch_enqueued=0 failed=0" in message
+    assert "already_dispatched=0 redispatch_enqueued=0 deferred=0 failed=0" in message
     assert level == "INFO"

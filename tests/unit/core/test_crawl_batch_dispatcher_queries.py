@@ -13,6 +13,8 @@ from antcode_core.application.services.crawl.batch_dispatcher_service import (
     CrawlBatchDispatcherService,
 )
 
+SEED_CONCURRENCY_QUOTA = 4
+
 
 @pytest.fixture
 def connection(monkeypatch):
@@ -64,6 +66,7 @@ async def test_partial_dispatch_failure_is_exposed(monkeypatch, active_scheduler
         project_id=1,
         status="running",
         seed_urls=["https://a.test", "https://b.test"],
+        max_concurrency=SEED_CONCURRENCY_QUOTA,
     )
     project = SimpleNamespace(id=1, public_id="project-1", type="rule")
     rule = SimpleNamespace()
@@ -71,6 +74,7 @@ async def test_partial_dispatch_failure_is_exposed(monkeypatch, active_scheduler
     monkeypatch.setattr(dispatcher_module.Project, "get_or_none", AsyncMock(return_value=project))
     monkeypatch.setattr(dispatcher_module.ProjectRule, "get_or_none", AsyncMock(return_value=rule))
     monkeypatch.setattr(service, "_already_dispatched_urls", AsyncMock(return_value=set()))
+    monkeypatch.setattr(service, "_active_run_ids_for_batch", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         service,
         "_dispatch_single_url",
@@ -144,7 +148,7 @@ async def test_dispatch_maps_batch_limits_without_reusing_request_timeout(monkey
     monkeypatch.setattr(dispatcher_module.TaskRun, "create", AsyncMock())
     monkeypatch.setattr(workers_module.worker_task_dispatcher, "dispatch_task", dispatch)
 
-    result = await service._dispatch_single_url(batch, project, rule, "https://a.test")
+    result = await service._dispatch_single_url(batch, project, rule, "https://a.test", seed_count=1)
 
     assert result is SeedDispatchOutcome.DISPATCHED
     kwargs = dispatch.await_args.kwargs
@@ -181,7 +185,8 @@ async def test_dispatch_preserves_zero_retry_and_request_delay(monkeypatch):
     monkeypatch.setattr(dispatcher_module.TaskRun, "create", AsyncMock())
     monkeypatch.setattr(workers_module.worker_task_dispatcher, "dispatch_task", dispatch)
 
-    assert await service._dispatch_single_url(batch, project, rule, "https://a.test") is SeedDispatchOutcome.DISPATCHED
+    outcome = await service._dispatch_single_url(batch, project, rule, "https://a.test", seed_count=1)
+    assert outcome is SeedDispatchOutcome.DISPATCHED
 
     rule_detail = dispatch.await_args.kwargs["params"]["kwargs"]["rule_detail"]
     assert rule_detail["retry_count"] == 0
@@ -211,7 +216,8 @@ async def test_prepared_deterministic_run_is_reused_after_crash(monkeypatch):
     monkeypatch.setattr(dispatcher_module.TaskRun, "create", create)
     monkeypatch.setattr(workers_module.worker_task_dispatcher, "dispatch_task", dispatch)
 
-    assert await service._dispatch_single_url(batch, project, rule, "https://a.test") is SeedDispatchOutcome.DISPATCHED
+    outcome = await service._dispatch_single_url(batch, project, rule, "https://a.test", seed_count=1)
+    assert outcome is SeedDispatchOutcome.DISPATCHED
 
     create.assert_not_awaited()
     dispatch.assert_awaited_once()
@@ -245,7 +251,8 @@ async def test_post_publish_marker_failure_keeps_task_run_for_replay(monkeypatch
     monkeypatch.setattr(dispatcher_module, "mark_dispatch_succeeded", marker)
     monkeypatch.setattr(service, "_delete_task_run", delete)
 
-    assert await service._dispatch_single_url(batch, project, rule, "https://a.test") is SeedDispatchOutcome.FAILED
+    outcome = await service._dispatch_single_url(batch, project, rule, "https://a.test", seed_count=1)
+    assert outcome is SeedDispatchOutcome.FAILED
 
     delete.assert_not_awaited()
 
@@ -269,6 +276,6 @@ async def test_invalid_batch_override_fails_before_task_run_creation(monkeypatch
     monkeypatch.setattr(dispatcher_module.TaskRun, "create", create)
 
     with pytest.raises(ValueError, match="field=max_retries"):
-        await service._dispatch_single_url(batch, project, rule, "https://a.test")
+        await service._dispatch_single_url(batch, project, rule, "https://a.test", seed_count=1)
 
     create.assert_not_awaited()

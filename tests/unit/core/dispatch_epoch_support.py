@@ -118,6 +118,7 @@ def patch_crawl_batch(monkeypatch) -> crawl_module.CrawlBatchDispatcherService:
     monkeypatch.setattr(crawl_module.TaskRun, "create", AsyncMock())
     monkeypatch.setattr(crawl_module, "mark_dispatch_succeeded", AsyncMock())
     monkeypatch.setattr(service, "_already_dispatched_urls", AsyncMock(return_value=set()))
+    monkeypatch.setattr(service, "_active_run_ids_for_batch", AsyncMock(return_value=[]))
     return service
 
 

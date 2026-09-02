@@ -27,7 +27,7 @@ from antcode_core.application.services.crawl.batch_dispatch_state import (
     mark_dispatch_succeeded,
     mark_redispatch_enqueued,
 )
-from antcode_core.application.services.crawl.batch_rule_options import batch_rule_overrides
+from antcode_core.application.services.crawl.batch_rule_options import batch_rule_overrides, batch_seed_slots
 from antcode_core.application.services.scheduler.rule_dispatch_constraints import (
     resolve_rule_dispatch_constraints,
 )
@@ -53,10 +53,9 @@ class CrawlBatchDispatcherService:
     async def handle_batch_event(self, event: str, batch_id: str) -> None:
         """事件入口。event ∈ {batch_started, batch_paused, batch_resumed, batch_cancelled}。
 
-        P1-14 (审查报告): 原实现 ``try/except`` 全吞后 return None，
-        ``scheduler_event_loop`` 就 ACK 掉消息，事件永久丢失但 DB 已改。
-        改为异常直接向上抛：由 ``scheduler_event_loop`` 的 XPENDING +
-        deliver_count 死信机制处理重试（默认 5 次后进死信）。
+        异常一律向上抛：吞掉就等于 ``scheduler_event_loop`` ACK 掉消息，事件
+        永久丢失而 DB 已改。抛出后由它的 XPENDING + deliver_count 死信机制重投，
+        保证"至少一次"而非"至多一次"。
         """
         if not batch_id:
             logger.warning(f"crawl batch 事件缺 batch_id: {event}")
@@ -70,9 +69,6 @@ class CrawlBatchDispatcherService:
         if handler is None:
             logger.debug(f"crawl batch 事件未处理: {event}")
             return
-        # NOTE: 不再 try/except 吞异常。让 scheduler_event_loop 感知失败以
-        # 触发 PEL 重投（未 ACK 消息 XPENDING 累计 deliver_count 超阈值后
-        # 才 ACK 进死信），保证事件"至少一次"而非"至多一次"。
         async with crawl_batch_aggregate_lock(batch_id):
             await handler(batch_id)
 
@@ -102,8 +98,8 @@ class CrawlBatchDispatcherService:
 
         # 只派发尚未派发的 URL
         already_dispatched = await self._already_dispatched_urls(batch_id)
-        seed_urls = list(batch.seed_urls or [])
-        pending_urls = [u for u in seed_urls if u and u not in already_dispatched]
+        seeds = [u for u in (batch.seed_urls or []) if u]
+        pending_urls = [u for u in seeds if u not in already_dispatched]
 
         if not pending_urls:
             logger.info(f"batch 无待派发 URL: batch_id={batch_id}")
@@ -112,7 +108,7 @@ class CrawlBatchDispatcherService:
         # B12: 批次派发不持有 Leader 身份，代际回读权威表并整批共用一个；
         # 读不到活跃 Master 权威时整个事件失败，保留 PEL 由 reclaim 重投。
         async with active_scheduler_dispatch_epoch():
-            tally = await self._dispatch_pending_urls(batch, project, rule, urls=pending_urls)
+            tally = await self._dispatch_pending_urls(batch, project, rule, urls=pending_urls, seed_count=len(seeds))
         self._log_dispatch_tally(batch_id, tally, total=len(pending_urls))
         # 任一 seed 既未直派成功、也未获得 durable redispatch intent 时，
         # batch_started 都不能 ACK。成功 seed 已有 TaskRun，重投时会被
@@ -147,11 +143,20 @@ class CrawlBatchDispatcherService:
         rule: ProjectRule,
         *,
         urls: list[str],
+        seed_count: int,
     ) -> Counter[SeedDispatchOutcome]:
-        """在调用方已打开的 Master 代际下逐个派发 URL，按结果分类计数。"""
+        """在调用方已打开的 Master 代际下派发 URL，按结果分类计数。
+
+        超额度的 seed 记 DEFERRED 不派发，槽位空出来后由 crawl_batch_status_loop
+        追派：seed 数多于额度时每 seed 并发已被地板顶到 1，只剩压住并行 seed 数
+        这一个手段能让总并发不超额度。
+        """
         tally: Counter[SeedDispatchOutcome] = Counter()
-        for url in urls:
-            tally[await self._dispatch_single_url(batch, project, rule, url)] += 1
+        slots = batch_seed_slots(batch, seed_count=seed_count)
+        budget = max(slots - len(await self._active_run_ids_for_batch(batch.public_id)), 0)
+        tally[SeedDispatchOutcome.DEFERRED] = max(len(urls) - budget, 0)
+        for url in urls[:budget]:
+            tally[await self._dispatch_single_url(batch, project, rule, url, seed_count=seed_count)] += 1
         return tally
 
     async def _on_batch_resumed(self, batch_id: str) -> None:
@@ -167,13 +172,10 @@ class CrawlBatchDispatcherService:
     async def _on_batch_cancelled(self, batch_id: str) -> None:
         """取消：把该 batch 已派发但未终态的 TaskRun 置 CANCELLED。
 
-        R1-P1-1 (审查报告): 走 ``execution_status_service.update_runtime_status``
-        而不是裸 ``filter().update()``——后者既无状态条件 CAS，又只写 status 不写
-        runtime_status，而终态吸收保护完全基于 runtime_status，迟到的 SUCCESS 会
-        穿过闸门把状态翻回。
-
-        Round 10: ``handle_batch_event`` 已持有 batch aggregate 的 advisory lock，
-        锁内读一次 active snapshot 全部取消即可，不需要有限轮询上限。
+        走 ``execution_status_service.update_runtime_status`` 而不是裸
+        ``filter().update()``：后者无状态 CAS 且只写 status，而终态吸收保护全靠
+        runtime_status，迟到的 SUCCESS 会穿过闸门把状态翻回。调用方已持有 batch
+        aggregate 的 advisory lock，锁内读一次 active snapshot 即可。
         """
         now = datetime.now(UTC)
         cancelled = 0
@@ -231,21 +233,20 @@ class CrawlBatchDispatcherService:
         project: Project,
         rule: ProjectRule,
         url: str,
+        *,
+        seed_count: int,
     ) -> SeedDispatchOutcome:
         """把单个 URL 作为一个 rule 任务派发。TaskRun.result_data 存 batch_id 用于关联。
 
-        P1-14 (审查报告): 派发流程做了 URL 幂等清理：
-        - run ID 由 batch + seed URL 确定，崩溃重放复用原 TaskRun。
-        - 保持 ``TaskRun.create → dispatch`` 顺序，使 Worker 早期回写有目标。
-        - 但 dispatch **失败且补派入队也失败**时，改为 **删除刚建的 TaskRun**
-          （旧实现是 UPDATE status=FAILED），这样 ``_already_dispatched_urls``
-          不会再把这个 URL 当"已派发"，下次 ``batch_resumed`` 能重试。
-        - 外层 Exception 同理：清理孤儿 TaskRun，异常向上抛走 PEL 重投。
+        run ID 由 batch + seed URL 确定，崩溃重放复用原 TaskRun；``create →
+        dispatch`` 的顺序保证 Worker 早期回写有目标。派发与补派双双失败时
+        **删掉**刚建的 TaskRun 而不是置 FAILED，否则 ``_already_dispatched_urls``
+        会把这个 URL 当已派发，下次 ``batch_resumed`` 再也重试不到它。
         """
         # 组装 rule dict（覆盖 target_url 为本次 URL）
         rule_dict = rule.to_dispatch_dict()
         rule_dict["target_url"] = url
-        rule_dict.update(batch_rule_overrides(batch))
+        rule_dict.update(batch_rule_overrides(batch, seed_count=seed_count))
         constraints = resolve_rule_dispatch_constraints(rule, rule_dict)
 
         run_id = crawl_batch_run_id(batch.public_id, url)
@@ -275,9 +276,8 @@ class CrawlBatchDispatcherService:
             # 派发
             from antcode_core.application.services.workers import worker_task_dispatcher
 
-            # R1-P0-1 (审查报告): rule_detail 必须塞在 ``params.kwargs`` 里，否则 worker
-            # engine._build_payload 会取到空 dict 而报"缺少 target_url"；crawl_batch_id
-            # 保留顶层供审计追溯。batch.timeout 是单次 HTTP 超时，不能当整进程任务超时。
+            # rule_detail 必须塞进 ``params.kwargs``，否则 worker engine._build_payload
+            # 取到空 dict 报"缺少 target_url"。batch.timeout 是单次 HTTP 超时，不是任务超时。
             task_timeout = DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS
             result = await worker_task_dispatcher.dispatch_task(
                 project_id=project.public_id,

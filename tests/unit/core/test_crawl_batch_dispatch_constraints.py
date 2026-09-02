@@ -47,7 +47,7 @@ async def test_failed_batch_dispatch_persists_inferred_constraints(monkeypatch):
     monkeypatch.setattr(redispatch_module.redispatch_service, "enqueue", enqueue)
 
     # 直派失败 + 入补派队列成功：结果是 REDISPATCH_ENQUEUED，不是"已派发"。
-    outcome = await service._dispatch_single_url(batch, project, rule, "https://a.test")
+    outcome = await service._dispatch_single_url(batch, project, rule, "https://a.test", seed_count=1)
 
     assert outcome is SeedDispatchOutcome.REDISPATCH_ENQUEUED
     assert dispatch.await_args.kwargs["region"] == "cn-east"

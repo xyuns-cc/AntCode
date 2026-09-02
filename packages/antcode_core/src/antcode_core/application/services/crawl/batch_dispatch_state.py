@@ -22,6 +22,8 @@ class SeedDispatchOutcome(StrEnum):
     DISPATCHED = "dispatched"
     ALREADY_DISPATCHED = "already_dispatched"
     REDISPATCH_ENQUEUED = "redispatch_enqueued"
+    # 批次并发额度已占满，本轮不派；槽位空出来后由状态 loop 追派。
+    DEFERRED = "deferred"
     FAILED = "failed"
 
 

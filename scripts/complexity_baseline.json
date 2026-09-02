@@ -959,19 +959,13 @@
       "path": "services/master/src/antcode_master/ingester/crawl_batch_status_loop.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 332
+      "value": 331
     },
     {
       "path": "services/master/src/antcode_master/ingester/crawl_batch_status_loop.py",
       "function": "CrawlBatchStatusLoop._reconcile_batch",
       "rule": "C901",
-      "value": 16
-    },
-    {
-      "path": "services/master/src/antcode_master/ingester/crawl_batch_status_loop.py",
-      "function": "CrawlBatchStatusLoop._reconcile_batch",
-      "rule": "PLR0912",
-      "value": 16
+      "value": 12
     },
     {
       "path": "services/master/src/antcode_master/ingester/crawl_batch_status_loop.py",

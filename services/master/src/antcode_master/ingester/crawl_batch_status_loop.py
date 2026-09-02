@@ -18,6 +18,9 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+from antcode_core.application.services.crawl.batch_dispatcher_service import (
+    crawl_batch_dispatcher_service,
+)
 from antcode_core.domain.models import CrawlBatch, TaskRun  # noqa: F401  # TaskRun 用于 raw() 类型标注
 from antcode_core.domain.models.enums import BatchStatus, TaskStatus
 from loguru import logger
@@ -82,29 +85,22 @@ class CrawlBatchStatusLoop:
                 logger.exception(f"crawl 批次状态推导 loop 异常: {exc}")
             await asyncio.sleep(self._poll_interval)
 
-    # R1-P1-16: 空批次/派发失败批次超过此阈值仍无 matched → 标 FAILED，
-    # 避免永久 RUNNING 被 alert loop 无限扫。
+    # 一条 run 都没建起来的批次超时兜底 FAILED，避免永久 RUNNING。
     EMPTY_BATCH_TIMEOUT_SECONDS = 900  # 15 分钟
 
-    # P1-14 (审查报告): seed_urls 尚未派完但 loop 就认为"所有 run 终态"要
-    # 提前终结批次。给部分派发的批次一个允许继续追派发的窗口，超时才 FAILED。
-    # 场景：seed_urls=100 但派发只到 60 个（redispatch pipeline 卡死等），
-    # 原实现 total=60 全 SUCCESS 就把批次标 COMPLETED，剩 40 个永远丢。
+    # 部分派发的批次要留出继续追派的窗口，超时才 FAILED：否则 seed=100 只派到
+    # 60 时，60 个全 SUCCESS 就会被推成 COMPLETED，剩下 40 个永久丢失。
     INCOMPLETE_DISPATCH_TIMEOUT_SECONDS = 1800  # 30 分钟
 
     async def _tick(self) -> None:
-        # R1-P1-15: PAUSED 批次**不能**在 _reconcile_batch 里推成 COMPLETED，
-        # PAUSED 语义是"暂停"、未派发的 seed 应能 RESUME 继续，若推成终态
-        # 相当于变相截断。这里只扫 RUNNING，让 PAUSED 留在 PAUSED，等
-        # RESUME 后回到 RUNNING 再推。
+        # 只扫 RUNNING：PAUSED 的未派发 seed 应能 RESUME 继续，把它推成终态
+        # 等于变相截断。
         batches = await CrawlBatch.filter(status=BatchStatus.RUNNING.value).all()
         if not batches:
             return
 
-        # T7-B2b (P1-5): 单条聚合查询代替 N 次 raw()。原实现 N 个 batch 每
-        # tick 发 N 次 SELECT * FROM task_executions WHERE ...=$1，N 大时
-        # 30s tick 变成放大器。改成 WHERE ... = ANY($1) GROUP BY，一次拿
-        # 所有批次的计数快照，Python 端按 batch_id 分派决策。
+        # 单条聚合查询代替 N 次 raw()——每 tick 发 N 条 SELECT，N 大时 30s tick
+        # 就是个放大器。
         stats = await self._fetch_batch_stats([b.public_id for b in batches])
         # R2 seam-5: 进度 hash 以 project **public_id** 为 key（与
         # batch_service.start_batch 的 init_progress 对齐），一次批量解析。
@@ -179,26 +175,15 @@ class CrawlBatchStatusLoop:
 
         `stat=None` 表示该 batch 目前一条 run 都没有——走空批次超时兜底。
 
-        **P1-32 修复**：所有终态写入改成"仅当仍是 RUNNING 才生效"的条件
-        UPDATE，杜绝下面这条 lost-update 竞态：
-        1. loop._tick 加载 RUNNING 批次列表 A
-        2. API 把 A 里某个批次改成 PAUSED / CANCELLED（合法状态机迁移）
-        3. loop 拿老对象照旧 ``batch.save()``，把 PAUSED / CANCELLED 又刷回
-           COMPLETED / FAILED，API 侧的操作被静默吞掉
-
-        CAS 允许的 from-status 集合固定为 ``{RUNNING}``——loop 本来就只处理
-        RUNNING 批次，其他任何状态都表示"API 已抢先，loop 让位"。
+        终态写入一律走"仅当仍是 RUNNING 才生效"的条件 UPDATE：loop 手上是
+        _tick 时的旧对象，裸 ``save()`` 会把 API 期间改出的 PAUSED / CANCELLED
+        刷回 COMPLETED / FAILED，把用户操作静默吞掉。
         """
-        # P1-14 (审查报告): seed_urls 完整性检查所需的分母。JSONField 可能
-        # 是 None/空 list/list[str]，统一 fallback。
         seed_count = len(batch.seed_urls or [])
 
-        # R2 seam-5 (接缝修复): crawl 链路没有任何环节做进度加法——
-        # batch_dispatcher 走 TaskRun 派发，不经过 queue_service，
-        # progress_service.update_progress 全链路零调用，进度 hash 永远停在
-        # init 值（completed=0 / pending=total）。本 loop 已经持有每个 batch
-        # 的 run 状态聚合，把它作为权威值同步进进度 hash（绝对值覆写，幂等）。
-        # 失败不阻断状态推导（进度是展示面，状态机是主干）。
+        # 派发链路不做进度加法，进度 hash 会一直停在 init 值。本 loop 已持有
+        # run 状态聚合，用它绝对值覆写（幂等）。失败不阻断状态推导——进度是
+        # 展示面，状态机才是主干。
         if stat and project_public_id:
             try:
                 await self._sync_progress(batch, stat, project_public_id, seed_count)
@@ -207,15 +192,17 @@ class CrawlBatchStatusLoop:
 
         if not stat:
             # R1-P1-16: 空批次超时兜底 FAILED，避免永久 RUNNING
-            if batch.started_at:
-                elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
-                if elapsed > self.EMPTY_BATCH_TIMEOUT_SECONDS:
-                    if await self._cas_terminate(batch, BatchStatus.FAILED.value):
-                        logger.warning(
-                            f"batch 空转超时 FAILED: batch_id={batch.public_id} "
-                            f"elapsed={elapsed:.0f}s seed_count={seed_count}"
-                        )
+            await self._fail_after_timeout(
+                batch,
+                self.EMPTY_BATCH_TIMEOUT_SECONDS,
+                f"空转 seed_count={seed_count}",
+            )
             return
+
+        # 批次并发额度只放行一部分 seed，剩下的要靠这里持续追派；不能等
+        # active 归零再派，否则一个慢 seed 就把整批堵到派发超时。
+        if stat["total"] < seed_count:
+            await self._continue_dispatch(batch)
 
         if stat["active"] > 0:
             return  # 还有正在跑的 run
@@ -225,21 +212,16 @@ class CrawlBatchStatusLoop:
         failed = stat["failed"]
         cancelled = stat["cancelled"]
 
-        # P1-14: seed 完整性判定——现有 run 数 < seed_urls 数时不能终结批次，
-        # 说明还有 URL 从未派发出去。旧实现只看现有 run 的终态占比就落
-        # COMPLETED，会把还没派发到的 40 URL 永久截断。
+        # 现有 run 数 < seed 数说明还有 URL 从未派发出去，只看现有 run 的终态
+        # 占比就落 COMPLETED 会把它们永久截断。
         if seed_count > 0 and total < seed_count:
-            if batch.started_at:
-                elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
-                if elapsed > self.INCOMPLETE_DISPATCH_TIMEOUT_SECONDS:
-                    if await self._cas_terminate(batch, BatchStatus.FAILED.value):
-                        logger.warning(
-                            f"batch seed 未派完超时 FAILED: batch_id={batch.public_id} "
-                            f"total={total} seed={seed_count} elapsed={elapsed:.0f}s"
-                        )
-                    return
-            # 未超时：让 batch_dispatcher/redispatch 继续追派剩余 URL，本轮不动。
-            logger.debug(f"batch seed 未派完，等待派发: batch_id={batch.public_id} total={total} seed={seed_count}")
+            if await self._fail_after_timeout(
+                batch,
+                self.INCOMPLETE_DISPATCH_TIMEOUT_SECONDS,
+                f"seed 未派完 total={total} seed={seed_count}",
+            ):
+                return
+            logger.debug(f"batch seed 未派完，等待追派: batch_id={batch.public_id} total={total} seed={seed_count}")
             return
 
         if success == total:
@@ -259,6 +241,29 @@ class CrawlBatchStatusLoop:
                 f"failed={failed} cancelled={cancelled}"
             )
 
+    async def _fail_after_timeout(self, batch: CrawlBatch, timeout_seconds: int, detail: str) -> bool:
+        """超过窗口仍没推进的 RUNNING 批次落 FAILED。返回是否已判定超时。"""
+        if not batch.started_at:
+            return False
+        elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
+        if elapsed <= timeout_seconds:
+            return False
+        if await self._cas_terminate(batch, BatchStatus.FAILED.value):
+            logger.warning(f"batch 超时 FAILED: batch_id={batch.public_id} {detail} elapsed={elapsed:.0f}s")
+        return True
+
+    @staticmethod
+    async def _continue_dispatch(batch: CrawlBatch) -> None:
+        """追派批次并发额度上一轮没放行的 seed。
+
+        失败只记日志：INCOMPLETE_DISPATCH_TIMEOUT_SECONDS 才是"永远派不完"的
+        兜底，让异常在这里中断推导会把那条兜底一起废掉。
+        """
+        try:
+            await crawl_batch_dispatcher_service.handle_batch_event("batch_resumed", batch.public_id)
+        except Exception as exc:
+            logger.warning(f"batch 追派失败(不影响状态推导): batch_id={batch.public_id} err={exc}")
+
     @staticmethod
     async def _sync_progress(
         batch: CrawlBatch,
@@ -266,17 +271,11 @@ class CrawlBatchStatusLoop:
         project_public_id: str,
         seed_count: int,
     ) -> None:
-        """R2 seam-5: 把 run 状态聚合覆写到批次进度 hash。
+        """把 run 状态聚合覆写到批次进度 hash（progress 只有 4 个计数位）。
 
-        计数映射（progress 只有 4 个计数位）：
-        - completed_urls = SUCCESS run 数
-        - failed_urls    = FAILED/TIMEOUT/REJECTED + CANCELLED run 数
-          （CANCELLED 归入 failed 侧，保证 total = completed + failed + pending
-          恒等式对消费者成立）
-        - pending_urls   = 分母 - completed - failed（含仍在跑的 run 和
-          尚未派发出去的 seed）
-        - total_urls     = max(seed 数, 已建 run 数)——正常时两者相等；
-          重复派发（at-least-once 副作用）时取 run 数避免 pending 变负。
+        CANCELLED 归入 failed 侧，好让 total = completed + failed + pending 这条
+        恒等式对消费者成立；total 取 max(seed 数, run 数)，重复派发的
+        at-least-once 副作用下才不会把 pending 算成负数。
         """
         from antcode_core.application.services.crawl.progress_service import (
             crawl_progress_service,
