@@ -3605,7 +3605,7 @@
       "path": "web/antcode-frontend/src/components/workers/SpiderStatsTab.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 436
+      "value": 366
     },
     {
       "path": "web/antcode-frontend/src/pages/AlertConfig/index.tsx",
