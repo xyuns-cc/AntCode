@@ -169,18 +169,14 @@ async def execution_inventory(client: Any, namespace: str):
 
 
 async def _ready_stream_keys(client: Any, namespace: str) -> tuple[str, ...]:
-    candidates = set(await _scan_keys(client, f"{namespace}:task:ready:*"))
-    candidates.update(await _scan_keys(client, f"{{{namespace}}}:task:ready:*"))
-    old = re.compile(rf"^{re.escape(namespace)}:task:ready:{_WORKER_SEGMENT}$")
-    current = re.compile(rf"^\{{{re.escape(namespace)}\}}:task:ready:{_WORKER_SEGMENT}$")
-    matched = [key for key in candidates if old.fullmatch(key) or current.fullmatch(key)]
-    return tuple(sorted(matched))
+    """只匹配 ready 队列本体；``:requeue:`` / ``:ack:`` / ``:{dlq}:`` 等派生 key 由 worker 段的完整匹配剔除。"""
+    candidates = await _scan_keys(client, f"{{{namespace}}}:task:ready:*")
+    pattern = re.compile(rf"^\{{{re.escape(namespace)}\}}:task:ready:{_WORKER_SEGMENT}$")
+    return tuple(sorted(key for key in candidates if pattern.fullmatch(key)))
 
 
 def _redispatch_specs(namespace: str) -> tuple[tuple[str, str], ...]:
     return (
-        (f"{namespace}:task:redispatch", "zset"),
-        (f"{namespace}:task:redispatch:processing", "hash"),
         (f"{{{namespace}}}:task:redispatch", "zset"),
         (f"{{{namespace}}}:task:redispatch:processing", "hash"),
     )

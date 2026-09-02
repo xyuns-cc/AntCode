@@ -1,11 +1,9 @@
-"""Ready stream 排空门禁：只读扫描新旧两种 ready stream key 形态。
+"""Ready stream 排空门禁：只读确认没有待执行任务卡在 ready stream 里。
 
-本次升级把 ready stream 的 Redis key 从 ``antcode:task:ready:<worker>`` 改成带
-Cluster hash-tag 的 ``{antcode}:task:ready:<worker>``（权威构造见
-``antcode_core.infrastructure.redis.control_plane.task_ready_stream``）。升级与
-回滚各会在另一形态上留下一批孤儿消息：不投递、不进 DLQ、无日志，只能等
-master reconcile 超时后标 FAILED。本脚本在停机窗口内做门禁，确认两种形态都
-已排空。
+停机窗口内跑：ready stream 里的残留是已派发但未被 Worker 消费的真实任务，
+带着它们重启控制面会让这批任务不投递、不进 DLQ、无日志，只能等 master
+reconcile 超时后标 FAILED。key 前缀从权威构造函数
+``antcode_core.infrastructure.redis.control_plane.task_ready_stream`` 派生。
 
 用法::
 
@@ -43,8 +41,6 @@ EXIT_WAIT_TIMEOUT = 2
 
 SCAN_COUNT = 500
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
-CURRENT_SHAPE = "current"
-LEGACY_SHAPE = "legacy"
 
 _WORKER_SEGMENT = r"[A-Za-z0-9_-]+"
 _NAMESPACE_PATTERN = re.compile(_WORKER_SEGMENT)
@@ -74,18 +70,17 @@ class ReadyStreamRequest:
 @dataclass(frozen=True)
 class ReadyStreamStats:
     key: str
-    shape: str
     entries: int
     pending: int
     unconsumed: int | None
     groups: tuple[StreamGroupStats, ...]
 
     @classmethod
-    def from_stream(cls, shape: str, stats: StreamStats) -> ReadyStreamStats:
+    def from_stream(cls, stats: StreamStats) -> ReadyStreamStats:
         lags = [group.unconsumed for group in stats.groups]
         unconsumed = None if None in lags else sum(lag for lag in lags if lag is not None)
         pending = sum(group.pending for group in stats.groups)
-        return cls(stats.key, shape, stats.entries, pending, unconsumed, stats.groups)
+        return cls(stats.key, stats.entries, pending, unconsumed, stats.groups)
 
 
 @dataclass(frozen=True)
@@ -106,49 +101,44 @@ class ReadyStreamReport:
         return value
 
 
-def stream_prefixes(namespace: str) -> tuple[tuple[str, str], ...]:
-    """返回 ``(形态, key 前缀)``；当前形态从权威 key 构造函数派生。
+def ready_stream_prefix(namespace: str) -> str:
+    """从权威 key 构造函数派生 key 前缀。
 
-    传入空 worker_id 拿到的就是 ``{ns}:task:ready:`` 前缀，因此 control_plane
-    改了 key 形状这里会自动跟随。legacy 形态定义为当前形态去掉 Cluster
-    hash-tag 大括号——找不到大括号说明迁移前提已不成立，直接报错而非静默跳过。
+    传入空 worker_id 拿到的就是 ``{ns}:task:ready:``，因此 control_plane 改了
+    key 形状这里会自动跟随。
     """
-    current = task_ready_stream("", namespace=namespace)
-    tagged = f"{{{namespace}}}"
-    if tagged not in current:
-        raise RuntimeError(f"ready stream key 已不含 Cluster hash-tag，无法派生 legacy 形态: {current}")
-    return ((CURRENT_SHAPE, current), (LEGACY_SHAPE, current.replace(tagged, namespace, 1)))
+    return task_ready_stream("", namespace=namespace)
 
 
-async def discover_ready_streams(client: Any, namespace: str) -> tuple[tuple[str, str], ...]:
-    """SCAN 两种形态的 ready stream key。
+async def discover_ready_streams(client: Any, namespace: str) -> tuple[str, ...]:
+    """SCAN ready stream key。
 
     ``:requeue:`` / ``:ack:`` / ``:{dlq}:`` 等派生 key 也会被前缀 glob 命中，
     靠 worker 段的完整匹配剔除——它们不是 ready 队列本体。
     """
-    found: dict[str, str] = {}
-    for shape, prefix in stream_prefixes(namespace):
-        pattern = re.compile(rf"^{re.escape(prefix)}{_WORKER_SEGMENT}$")
-        async for raw_key in client.scan_iter(match=f"{prefix}*", count=SCAN_COUNT):
-            key = _text(raw_key)
-            if pattern.fullmatch(key):
-                found[key] = shape
-    return tuple(sorted((shape, key) for key, shape in found.items()))
+    prefix = ready_stream_prefix(namespace)
+    pattern = re.compile(rf"^{re.escape(prefix)}{_WORKER_SEGMENT}$")
+    found = {
+        key
+        async for raw_key in client.scan_iter(match=f"{prefix}*", count=SCAN_COUNT)
+        if pattern.fullmatch(key := _text(raw_key))
+    }
+    return tuple(sorted(found))
 
 
-async def _inspect_ready_stream(client: Any, shape: str, key: str) -> tuple[ReadyStreamStats | None, list[Blocker]]:
+async def _inspect_ready_stream(client: Any, key: str) -> tuple[ReadyStreamStats | None, list[Blocker]]:
     redis_type = _text(await client.type(key))
     if redis_type != "stream":
         return None, [Blocker("ready_stream_type", key, f"expected=stream, actual={redis_type}")]
     stats, findings = await inspect_stream(client, key, inspect_envelopes=False)
-    return ReadyStreamStats.from_stream(shape, stats), findings
+    return ReadyStreamStats.from_stream(stats), findings
 
 
 async def scan_once(client: Any, request: ReadyStreamRequest, attempt: int) -> ReadyStreamReport:
     streams: list[ReadyStreamStats] = []
     blockers: list[Blocker] = []
-    for shape, key in await discover_ready_streams(client, request.namespace):
-        stats, findings = await _inspect_ready_stream(client, shape, key)
+    for key in await discover_ready_streams(client, request.namespace):
+        stats, findings = await _inspect_ready_stream(client, key)
         if stats is not None:
             streams.append(stats)
         blockers.extend(findings)
@@ -270,8 +260,8 @@ __all__ = [
     "ReadyStreamStats",
     "discover_ready_streams",
     "main",
+    "ready_stream_prefix",
     "run",
     "scan_once",
-    "stream_prefixes",
     "wait_until_drained",
 ]

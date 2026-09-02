@@ -46,7 +46,7 @@ def test_container_runtime_settings_are_explicit_and_fail_closed(monkeypatch) ->
 @pytest.mark.asyncio
 async def test_stream_reports_group_pel_and_unconsumed_counts() -> None:
     redis = UpgradeRedisFake()
-    key = "tenant-a:task:ready:worker-1"
+    key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [("1-0", {"sensitive_payload_envelope": _envelope(2)})]
     redis.groups[key] = [{"name": "tenant-a-workers", "lag": EXPECTED_UNCONSUMED}]
     redis.pending[(key, "tenant-a-workers")] = 1
@@ -62,7 +62,7 @@ async def test_stream_reports_group_pel_and_unconsumed_counts() -> None:
 @pytest.mark.asyncio
 async def test_missing_stream_lag_cannot_be_treated_as_drained() -> None:
     redis = UpgradeRedisFake()
-    key = "tenant-a:task:ready:worker-1"
+    key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [("1-0", {"sensitive_payload_envelope": _envelope(2)})]
     redis.groups[key] = [{"name": "tenant-a-workers"}]
 
@@ -74,7 +74,7 @@ async def test_missing_stream_lag_cannot_be_treated_as_drained() -> None:
 @pytest.mark.asyncio
 async def test_retained_ready_entry_with_v1_envelope_blocks_even_when_group_is_drained() -> None:
     redis = UpgradeRedisFake()
-    key = "tenant-a:task:ready:worker-1"
+    key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [("1-0", {"sensitive_payload_envelope": _envelope(1)})]
     redis.groups[key] = [{"name": "tenant-a-workers", "lag": 0}]
 
@@ -89,7 +89,7 @@ async def test_retained_ready_entry_with_v1_envelope_blocks_even_when_group_is_d
 @pytest.mark.asyncio
 async def test_ready_envelope_scan_continues_across_all_pages() -> None:
     redis = UpgradeRedisFake()
-    key = "tenant-a:task:ready:worker-1"
+    key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [
         (f"{index}-0", {"sensitive_payload_envelope": _envelope(2)}) for index in range(1, MULTI_PAGE_STREAM_ENTRIES)
     ]
@@ -109,11 +109,16 @@ async def test_v2_ready_entry_is_allowed_after_pel_and_lag_reach_zero() -> None:
     key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [("1-0", {"sensitive_payload_envelope": _envelope(2)})]
     redis.groups[key] = [{"name": "tenant-a-workers", "lag": 0}]
+    # 无 hash-tag 的 key 不是本产品写得出来的形状（唯一的 ready 写入方是
+    # lease_fenced_ready_publish 的 Lua，key 恒为 task_ready_stream 的输出），不扫。
+    redis.streams["tenant-a:task:ready:worker-1"] = [("1-0", {"sensitive_payload_envelope": _envelope(1)})]
+    redis.zsets["tenant-a:task:redispatch"] = [("{}", 1.0)]
 
     report = await build_report(redis, _request())
 
     assert report.safe is True
-    assert report.streams[0].entries == 1
+    assert [item.key for item in report.streams] == [key]
+    assert report.execution_stores == ()
 
 
 @pytest.mark.asyncio
@@ -131,7 +136,7 @@ async def test_ready_dead_letter_companion_is_not_misclassified_as_execution_que
 @pytest.mark.asyncio
 async def test_ready_main_key_wrong_type_is_a_reported_blocker() -> None:
     redis = UpgradeRedisFake()
-    key = "tenant-a:task:ready:worker-1"
+    key = "{tenant-a}:task:ready:worker-1"
     redis.hashes[key] = {"unexpected": "value"}
 
     report = await build_report(redis, _request())
@@ -144,7 +149,7 @@ async def test_ready_main_key_wrong_type_is_a_reported_blocker() -> None:
 @pytest.mark.asyncio
 async def test_plaintext_redispatch_member_is_reported_and_blocks_startup() -> None:
     redis = UpgradeRedisFake()
-    key = "tenant-a:task:redispatch"
+    key = "{tenant-a}:task:redispatch"
     redis.zsets[key] = [(json.dumps({"params": {"setting": "legacy-plaintext-value"}}), 1.0)]
 
     report = await build_report(redis, _request())

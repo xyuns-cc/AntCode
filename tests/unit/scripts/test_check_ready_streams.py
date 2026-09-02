@@ -11,8 +11,7 @@ from scripts import check_ready_streams
 
 URL = "redis://127.0.0.1:6379/0"
 NAMESPACE = "antcode"
-CURRENT_KEY = "{antcode}:task:ready:worker-a"
-LEGACY_KEY = "antcode:task:ready:worker-a"
+READY_KEY = "{antcode}:task:ready:worker-a"
 GROUP = "antcode-workers"
 # 截止时间取极小正值：首轮扫描后 remaining 必然 <= 0，无需真实等待即可复现超时分支。
 INSTANT_TIMEOUT_SECONDS = 1e-9
@@ -101,41 +100,26 @@ def _report(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
     return json.loads(capsys.readouterr().out)
 
 
-def test_stream_prefixes_derive_current_shape_from_control_plane() -> None:
-    assert check_ready_streams.stream_prefixes(NAMESPACE) == (
-        ("current", "{antcode}:task:ready:"),
-        ("legacy", "antcode:task:ready:"),
-    )
-
-
-def test_stream_prefixes_reject_namespace_without_hash_tag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(check_ready_streams, "task_ready_stream", lambda _wid, namespace: f"{namespace}:task:ready:")
-    with pytest.raises(RuntimeError, match="Cluster hash-tag"):
-        check_ready_streams.stream_prefixes(NAMESPACE)
+def test_prefix_is_derived_from_the_control_plane_key_builder() -> None:
+    assert check_ready_streams.ready_stream_prefix(NAMESPACE) == "{antcode}:task:ready:"
 
 
 @pytest.mark.asyncio
-async def test_discover_matches_both_shapes_and_rejects_derived_keys() -> None:
+async def test_discover_matches_ready_queues_and_rejects_derived_keys() -> None:
     client = _FakeRedis()
-    client.add_stream(CURRENT_KEY, _FakeStream())
-    client.add_stream(LEGACY_KEY, _FakeStream())
+    client.add_stream(READY_KEY, _FakeStream())
     for noise in (
-        f"{CURRENT_KEY}:requeue:task-1",
-        f"{CURRENT_KEY}:ack:task-1",
-        f"{CURRENT_KEY}:{{dlq}}:task:dead_letter",
+        f"{READY_KEY}:requeue:task-1",
+        f"{READY_KEY}:ack:task-1",
+        f"{READY_KEY}:{{dlq}}:task:dead_letter",
         "{antcode}:task:result",
         "{other}:task:ready:worker-a",
+        "antcode:task:ready:worker-a",
     ):
         client.add_stream(noise, _FakeStream())
 
-    assert await check_ready_streams.discover_ready_streams(client, NAMESPACE) == (
-        ("current", CURRENT_KEY),
-        ("legacy", LEGACY_KEY),
-    )
-    assert client.scan_calls == [
-        ("{antcode}:task:ready:*", check_ready_streams.SCAN_COUNT),
-        ("antcode:task:ready:*", check_ready_streams.SCAN_COUNT),
-    ]
+    assert await check_ready_streams.discover_ready_streams(client, NAMESPACE) == (READY_KEY,)
+    assert client.scan_calls == [("{antcode}:task:ready:*", check_ready_streams.SCAN_COUNT)]
 
 
 @pytest.mark.parametrize("command", FORBIDDEN_COMMANDS)
@@ -146,7 +130,7 @@ def test_gate_never_calls_write_or_payload_commands(command: str) -> None:
 
 def test_acked_streams_exit_zero(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     client = _FakeRedis()
-    client.add_stream(CURRENT_KEY, _FakeStream(entries=DRAINED_ENTRIES, groups=[_FakeGroup()]))
+    client.add_stream(READY_KEY, _FakeStream(entries=DRAINED_ENTRIES, groups=[_FakeGroup()]))
 
     assert _run_main(client, monkeypatch) == check_ready_streams.EXIT_DRAINED
 
@@ -155,8 +139,7 @@ def test_acked_streams_exit_zero(monkeypatch: pytest.MonkeyPatch, capsys: pytest
     assert report["blockers"] == []
     assert report["streams"] == [
         {
-            "key": CURRENT_KEY,
-            "shape": "current",
+            "key": READY_KEY,
             "entries": DRAINED_ENTRIES,
             "pending": 0,
             "unconsumed": 0,
@@ -171,13 +154,12 @@ def test_pending_messages_exit_with_residue_code(
 ) -> None:
     group = _FakeGroup(pending=RESIDUE_PENDING, lag=RESIDUE_UNCONSUMED)
     client = _FakeRedis()
-    client.add_stream(LEGACY_KEY, _FakeStream(entries=RESIDUE_ENTRIES, groups=[group]))
+    client.add_stream(READY_KEY, _FakeStream(entries=RESIDUE_ENTRIES, groups=[group]))
 
     assert _run_main(client, monkeypatch) == check_ready_streams.EXIT_RESIDUE
 
     report = _report(capsys)
     assert report["drained"] is False
-    assert report["streams"][0]["shape"] == "legacy"
     assert report["streams"][0]["pending"] == RESIDUE_PENDING
     assert report["streams"][0]["unconsumed"] == RESIDUE_UNCONSUMED
     assert [blocker["code"] for blocker in report["blockers"]] == ["execution_queue_not_drained"]
@@ -187,7 +169,7 @@ def test_stream_without_consumer_group_is_reported(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     client = _FakeRedis()
-    client.add_stream(LEGACY_KEY, _FakeStream(entries=RESIDUE_ENTRIES))
+    client.add_stream(READY_KEY, _FakeStream(entries=RESIDUE_ENTRIES))
 
     assert _run_main(client, monkeypatch) == check_ready_streams.EXIT_RESIDUE
     assert [blocker["code"] for blocker in _report(capsys)["blockers"]] == ["unconsumed_stream"]
@@ -197,7 +179,7 @@ def test_missing_lag_is_reported_instead_of_assumed_drained(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     client = _FakeRedis()
-    client.add_stream(CURRENT_KEY, _FakeStream(entries=RESIDUE_ENTRIES, groups=[_FakeGroup(lag=None)]))
+    client.add_stream(READY_KEY, _FakeStream(entries=RESIDUE_ENTRIES, groups=[_FakeGroup(lag=None)]))
 
     assert _run_main(client, monkeypatch) == check_ready_streams.EXIT_RESIDUE
 
@@ -210,14 +192,14 @@ def test_non_stream_key_is_reported_as_type_blocker(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     client = _FakeRedis()
-    client.types[CURRENT_KEY] = "list"
+    client.types[READY_KEY] = "list"
 
     assert _run_main(client, monkeypatch) == check_ready_streams.EXIT_RESIDUE
 
     report = _report(capsys)
     assert report["streams"] == []
     assert report["blockers"] == [
-        {"code": "ready_stream_type", "key": CURRENT_KEY, "detail": "expected=stream, actual=list"}
+        {"code": "ready_stream_type", "key": READY_KEY, "detail": "expected=stream, actual=list"}
     ]
 
 
@@ -226,7 +208,7 @@ def test_wait_returns_once_workers_drain_the_stream(
 ) -> None:
     stream = _FakeStream(entries=RESIDUE_ENTRIES, groups=[_FakeGroup(pending=RESIDUE_PENDING)])
     client = _FakeRedis()
-    client.add_stream(CURRENT_KEY, stream)
+    client.add_stream(READY_KEY, stream)
 
     def drain(fake: _FakeRedis) -> None:
         if fake.scan_passes > DRAIN_AFTER_SCANS:
@@ -246,7 +228,7 @@ def test_wait_timeout_uses_dedicated_exit_code(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     client = _FakeRedis()
-    client.add_stream(CURRENT_KEY, _FakeStream(entries=RESIDUE_ENTRIES, groups=[_FakeGroup(pending=RESIDUE_PENDING)]))
+    client.add_stream(READY_KEY, _FakeStream(entries=RESIDUE_ENTRIES, groups=[_FakeGroup(pending=RESIDUE_PENDING)]))
 
     exit_code = _run_main(client, monkeypatch, "--wait", str(INSTANT_TIMEOUT_SECONDS))
 
