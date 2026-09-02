@@ -1,10 +1,4 @@
-"""
-依赖注入容器
-
-负责组装 Worker 的所有组件。
-
-Requirements: 2.4
-"""
+"""依赖注入容器：组装 Worker 的所有组件。Requirements: 2.4"""
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -17,18 +11,10 @@ from antcode_worker.app.control_plane_rejection import require_success_body
 
 @dataclass
 class Container:
-    """
-    依赖注入容器
+    """管理 Worker 所有组件的生命周期和依赖关系。"""
 
-    管理 Worker 所有组件的生命周期和依赖关系。
-
-    Requirements: 2.4
-    """
-
-    # 配置
     config: Any = None
 
-    # 核心组件
     transport: Any = None
     engine: Any = None
     runtime_manager: Any = None
@@ -37,40 +23,32 @@ class Container:
     log_manager: Any = None
     heartbeat_reporter: Any = None
 
-    # 可观测性
     metrics_server: Any = None
     health_server: Any = None
     observability_server: Any = None
     metrics_collector: Any = None
 
-    # 项目与产物
     project_fetcher: Any = None
     artifact_manager: Any = None
 
-    # 安全
     identity: Any = None
     secrets: Any = None
 
-    # 状态
     _initialized: bool = False
     _components: dict[str, Any] = field(default_factory=dict)
 
     def register(self, name: str, component: Any) -> None:
-        """注册组件"""
         self._components[name] = component
         setattr(self, name, component)
         logger.debug(f"组件已注册: {name}")
 
     def get(self, name: str) -> Any | None:
-        """获取组件"""
         return self._components.get(name) or getattr(self, name, None)
 
     def is_initialized(self) -> bool:
-        """是否已初始化"""
         return self._initialized
 
     def mark_initialized(self) -> None:
-        """标记为已初始化"""
         self._initialized = True
 
 
@@ -85,15 +63,7 @@ class _TransportBootstrap:
 
 
 def create_container(config: Any) -> Container:
-    """
-    创建并配置依赖容器
-
-    Args:
-        config: Worker 配置
-
-    Returns:
-        配置好的容器
-    """
+    """创建并配置依赖容器"""
     container = Container(config=config)
 
     # T6-T4a: registry 提前创建，否则 transport 内 register-direct 时读不到能力
@@ -103,39 +73,32 @@ def create_container(config: Any) -> Container:
 
     capabilities = detect_plugin_capabilities(plugin_registry)
 
-    # 1. 传输层。两种模式都必须注入启动能力快照，否则控制面拿到空能力、
-    # Lease 快照与真实插件集不一致（Direct 侧续租被判 capabilities_changed）。
+    # 两种模式都必须注入启动能力快照，否则控制面拿到空能力、Lease 快照与真实
+    # 插件集不一致（Direct 侧续租被判 capabilities_changed）。
     transport = _create_transport(config)
     transport.set_capabilities(capabilities)
     container.register("transport", transport)
 
-    # 2. 创建运行时管理器
     runtime_manager = _create_runtime_manager(config)
     container.register("runtime_manager", runtime_manager)
 
-    # 3. 创建执行器
     executor = _create_executor(config)
     container.register("executor", executor)
 
-    # 5. 创建日志管理器工厂
     log_manager = _create_log_manager(config, transport)
     container.register("log_manager", log_manager)
 
-    # 6. 创建指标采集器
     metrics_collector = _create_metrics_collector(config)
     container.register("metrics_collector", metrics_collector)
 
-    # 7. 创建心跳上报器
     heartbeat_reporter = _create_heartbeat_reporter(config, transport, metrics_collector)
     container.register("heartbeat_reporter", heartbeat_reporter)
 
-    # 8. 创建项目获取器与产物管理器
     project_fetcher = _create_project_fetcher(config, transport)
     container.register("project_fetcher", project_fetcher)
     artifact_manager = _create_artifact_manager(config, transport)
     container.register("artifact_manager", artifact_manager)
 
-    # 9. 创建引擎（依赖其他组件）
     from antcode_worker.app.engine_wiring import create_engine
 
     engine = create_engine(
@@ -153,7 +116,6 @@ def create_container(config: Any) -> Container:
     )
     container.register("engine", engine)
 
-    # 11. 创建可观测性服务器
     observability_server = _create_observability_server(transport, engine, metrics_collector)
     container.register("observability_server", observability_server)
 
@@ -164,13 +126,7 @@ def create_container(config: Any) -> Container:
 
 
 def _create_transport(config: Any) -> Any:
-    """创建传输层
-
-    使用新的工厂模块，支持：
-    - 强制二选一配置校验
-    - 启动 Banner 打印
-    - 启动自检（可选）
-    """
+    """创建传输层"""
     from antcode_worker.transport.factory import (
         DirectConfig,
         GatewayConfigSpec,
@@ -179,7 +135,6 @@ def _create_transport(config: Any) -> Any:
         build_gateway_transport_config,
     )
 
-    # 构建传输层配置
     transport_mode = getattr(config, "transport_mode", "gateway")
 
     bootstrap = _prepare_transport_bootstrap(config, transport_mode)
@@ -188,7 +143,6 @@ def _create_transport(config: Any) -> Any:
     if transport_mode == "direct":
         worker_id, credentials = _prepare_direct_transport(config, bootstrap)
 
-    # 构建配置对象
     transport_config = TransportConfig(
         mode=transport_mode,
         worker_id=worker_id,
@@ -224,7 +178,7 @@ def _create_transport(config: Any) -> Any:
         ),
     )
 
-    # 工厂创建传输层（同步包装）；自检需异步，放到 lifecycle 执行
+    # 启动自检需异步，放到 lifecycle 执行，这里只做同步校验 + Banner。
     from antcode_worker.transport.factory import (
         TransportConfigError,
         print_transport_banner,
@@ -239,7 +193,6 @@ def _create_transport(config: Any) -> Any:
 
     print_transport_banner(transport_config)
 
-    # 创建传输层实例
     if transport_mode == "direct":
         from antcode_worker.transport.redis import RedisTransport
 
@@ -258,7 +211,6 @@ def _create_transport(config: Any) -> Any:
         gateway_config = build_gateway_transport_config(transport_config)
         transport = GatewayTransport(gateway_config=gateway_config)
         if worker_id:
-            # 再走一次 set_credentials，确保与 wiring 拿到的 worker_id 一致
             transport.set_credentials(worker_id=worker_id)
         return transport
 
@@ -311,17 +263,16 @@ def _prepare_transport_bootstrap(config: Any, transport_mode: str) -> _Transport
 def _require_control_credentials(config: Any, credential_service: Any, credentials: Any, *, required: bool) -> Any:
     """本地有一份结构合法的凭据就直接放行，不向控制面求证。
 
-    这是**刻意**的：控制面若拒绝这份身份（例如库被重建后 worker_id 已不存在），
-    正确动作是带着可执行指令硬失败，而不是自动拿安装 Key 重注册——安装 Key 一次性
+    这是**刻意**的：控制面拒绝这份身份时（例如库被重建后 worker_id 已不存在），
+    正确动作是带可执行指令硬失败，而不是自动拿安装 Key 重注册——安装 Key 一次性
     （ACK 后恢复窗口永久关闭，库重建后 Key 记录本身也没了），且"被拒就自己回来"
     会打穿管理员删除/停用 Worker 这条撤销手段。
 
-    **谁来给那句可执行的报错，取决于传输模式**：Direct 模式在 ACL 签发那一步、
-    Gateway 模式在残留的注册 ACK 那一步，由 ``control_plane_rejection`` 给出。
-    但**稳态 Gateway Worker 一次签名 HTTP 请求都不发**（租约/心跳/派发全走 gRPC），
-    它在库重建后先撞上的是 Gateway 拦截器的 ``UNAUTHENTICATED 认证失败: 无效的
-    API Key``，最终以 ``RuntimeError("传输层启动失败")`` 退出——那条链路目前没有
-    结构化归因，见 ``control_plane_rejection`` 模块文档的适用范围一段。
+    那句可执行报错由谁给取决于传输模式：Direct 在 ACL 签发那步、Gateway 在残留的
+    注册 ACK 那步，由 ``control_plane_rejection`` 给出。但**稳态 Gateway Worker 一次
+    签名 HTTP 请求都不发**（租约/心跳/派发全走 gRPC），库重建后它先撞上 Gateway 拦截器
+    的 ``UNAUTHENTICATED 无效的 API Key``，最终以 ``RuntimeError("传输层启动失败")``
+    退出——该链路无结构化归因，见 ``control_plane_rejection`` 模块文档的适用范围一段。
     """
     if not required or (credentials and credentials.is_valid()):
         return credentials
@@ -465,7 +416,6 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
 
 
 def _create_runtime_manager(config: Any) -> Any:
-    """创建运行时管理器"""
     import os
 
     from antcode_worker.config import DATA_ROOT
@@ -487,11 +437,7 @@ def _create_runtime_manager(config: Any) -> Any:
 
 
 def _create_executor(config: Any) -> Any:
-    """创建执行器。
-
-    按 config.sandbox_mode 分派 SandboxExecutor。之前 wiring 硬编码 ProcessExecutor,导致
-    SandboxExecutor 虽定义但从不被使用。
-    """
+    """按 config.sandbox_mode 分派执行器；sandbox 以外的模式一律拒绝启动。"""
     import os
     import shlex
     import shutil
@@ -560,7 +506,6 @@ def _create_executor(config: Any) -> Any:
 
 
 def _create_plugin_registry(config: Any) -> Any:
-    """创建插件注册表"""
     from antcode_worker.plugins.registry import PluginRegistry
 
     registry = PluginRegistry()
@@ -569,7 +514,6 @@ def _create_plugin_registry(config: Any) -> Any:
 
 
 def _create_log_manager(config: Any, transport: Any) -> Any:
-    """创建日志管理器"""
     from antcode_worker.logs.manager import LogManagerConfig, LogManagerFactory
 
     log_config = LogManagerConfig()
@@ -578,7 +522,6 @@ def _create_log_manager(config: Any, transport: Any) -> Any:
 
 
 def _create_metrics_collector(config: Any) -> Any:
-    """创建系统指标采集器"""
     from antcode_worker.heartbeat.system_metrics import init_metrics_collector
 
     max_concurrent = getattr(config, "max_concurrent_tasks", 5)
@@ -586,7 +529,6 @@ def _create_metrics_collector(config: Any) -> Any:
 
 
 def _create_heartbeat_reporter(config: Any, transport: Any, metrics_collector: Any) -> Any:
-    """创建心跳上报器"""
     from antcode_worker.heartbeat.reporter import HeartbeatReporter
 
     worker_id = "unknown"
@@ -626,7 +568,7 @@ def _create_tombstone_redis(transport: Any) -> Any:
 
     不能用 ``config.redis_url``：那不含运行时签发的 per-worker ACL 凭据，查询必然
     "Authentication required"，取消墓碑会退化成单进程内存、跨进程取消语义静默失效。
-    Gateway 模式无连接串返回 None 属设计内；建连失败直接抛出，不再吞异常。"""
+    Gateway 模式无连接串返回 None 属设计内。"""
     redis_url = str(getattr(transport, "_redis_url", "") or "")
     if not redis_url:
         return None
@@ -652,7 +594,6 @@ def _create_artifact_transfer_store(config: Any, transport: Any) -> Any:
 
 
 def _create_project_fetcher(config: Any, transport: Any) -> Any:
-    """创建项目获取器"""
     import os
 
     from antcode_worker.config import DATA_ROOT
@@ -666,7 +607,6 @@ def _create_project_fetcher(config: Any, transport: Any) -> Any:
 
 
 def _create_artifact_manager(config: Any, transport: Any) -> Any:
-    """创建产物管理器"""
     from antcode_worker.executor.artifacts import ArtifactManager
 
     store = _create_artifact_transfer_store(config, transport)
