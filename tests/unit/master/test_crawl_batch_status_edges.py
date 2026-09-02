@@ -30,6 +30,7 @@ def _batch(*, age_seconds, seed_count=2):
     return SimpleNamespace(
         id=1,
         public_id="batch-1",
+        name="batch-1-name",
         project_id=9,
         seed_urls=[f"https://example.test/{index}" for index in range(seed_count)],
         started_at=datetime.now(UTC) - timedelta(seconds=age_seconds),

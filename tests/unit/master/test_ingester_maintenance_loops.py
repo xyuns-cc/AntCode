@@ -109,6 +109,7 @@ def _batch(*, seed_count=2):
     return SimpleNamespace(
         id=1,
         public_id="batch-1",
+        name="batch-1-name",
         project_id=9,
         seed_urls=[f"https://example.test/{index}" for index in range(seed_count)],
         started_at=datetime.now(UTC) - timedelta(hours=1),
@@ -230,7 +231,7 @@ async def test_batch_tick_isolates_one_batch_failure(monkeypatch):
         return {}
 
     monkeypatch.setattr(batch_module, "CrawlBatch", batch_model)
-    loop._fetch_batch_stats = stats
+    monkeypatch.setattr(batch_module, "fetch_batch_stats", stats)
     loop._fetch_project_public_ids = projects
     loop._reconcile_batch = reconcile
 

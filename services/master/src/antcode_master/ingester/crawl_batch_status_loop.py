@@ -21,27 +21,13 @@ from datetime import UTC, datetime
 from antcode_core.application.services.crawl.batch_dispatcher_service import (
     crawl_batch_dispatcher_service,
 )
-from antcode_core.domain.models import CrawlBatch, TaskRun  # noqa: F401  # TaskRun 用于 raw() 类型标注
-from antcode_core.domain.models.enums import BatchStatus, TaskStatus
+from antcode_core.domain.models import CrawlBatch
+from antcode_core.domain.models.enums import BatchStatus
 from loguru import logger
 
+from antcode_master.ingester.crawl_batch_alerts import crawl_batch_alerts
+from antcode_master.ingester.crawl_batch_stats_query import fetch_batch_stats
 from antcode_master.leader import ensure_leader
-
-# 终态集合与 execution_status_service 保持一致
-_RUN_TERMINAL_STATES = {
-    TaskStatus.SUCCESS,
-    TaskStatus.FAILED,
-    TaskStatus.CANCELLED,
-    TaskStatus.TIMEOUT,
-    TaskStatus.SKIPPED,
-    TaskStatus.REJECTED,
-}
-
-# T7-B2b: 聚合 SQL 里用字面量字符串（TaskStatus.value）
-_TERMINAL_STR = tuple(s.value for s in _RUN_TERMINAL_STATES)
-_SUCCESS_STR = TaskStatus.SUCCESS.value
-_CANCELLED_STR = TaskStatus.CANCELLED.value
-_FAILED_LIKE_STR = (TaskStatus.FAILED.value, TaskStatus.TIMEOUT.value, TaskStatus.REJECTED.value)
 
 
 class CrawlBatchStatusLoop:
@@ -101,7 +87,8 @@ class CrawlBatchStatusLoop:
 
         # 单条聚合查询代替 N 次 raw()——每 tick 发 N 条 SELECT，N 大时 30s tick
         # 就是个放大器。
-        stats = await self._fetch_batch_stats([b.public_id for b in batches])
+        stats = await fetch_batch_stats([b.public_id for b in batches])
+        crawl_batch_alerts.retain({b.public_id for b in batches})
         # R2 seam-5: 进度 hash 以 project **public_id** 为 key（与
         # batch_service.start_batch 的 init_progress 对齐），一次批量解析。
         project_public_ids = await self._fetch_project_public_ids([b.project_id for b in batches])
@@ -126,44 +113,6 @@ class CrawlBatchStatusLoop:
 
         rows = await Project.filter(id__in=unique_ids).only("id", "public_id").all()
         return {row.id: row.public_id for row in rows}
-
-    async def _fetch_batch_stats(self, batch_ids: list[str]) -> dict[str, dict[str, int]]:
-        """一次拉出所有 batch 的 run 状态计数；无 run 的 batch 不返回。"""
-        if not batch_ids:
-            return {}
-        from tortoise import connections
-
-        sql = f"""
-            SELECT
-                result_data->>'crawl_batch_id' AS batch_id,
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status = '{_SUCCESS_STR}') AS success,
-                COUNT(*) FILTER (WHERE status IN {_FAILED_LIKE_STR}) AS failed,
-                COUNT(*) FILTER (WHERE status = '{_CANCELLED_STR}') AS cancelled,
-                COUNT(*) FILTER (WHERE status NOT IN {_TERMINAL_STR}) AS active,
-                COUNT(DISTINCT worker_id) FILTER (
-                    WHERE status NOT IN {_TERMINAL_STR} AND worker_id IS NOT NULL
-                ) AS active_workers
-            FROM task_executions
-            WHERE result_data->>'crawl_batch_id' = ANY($1)
-            GROUP BY result_data->>'crawl_batch_id'
-        """
-        conn = connections.get("default")
-        _, rows = await conn.execute_query(sql, [batch_ids])
-        out: dict[str, dict[str, int]] = {}
-        for row in rows:
-            bid = row.get("batch_id")
-            if not bid:
-                continue
-            out[bid] = {
-                "total": int(row.get("total", 0)),
-                "success": int(row.get("success", 0)),
-                "failed": int(row.get("failed", 0)),
-                "cancelled": int(row.get("cancelled", 0)),
-                "active": int(row.get("active", 0)),
-                "active_workers": int(row.get("active_workers", 0)),
-            }
-        return out
 
     async def _reconcile_batch(
         self,
@@ -198,6 +147,9 @@ class CrawlBatchStatusLoop:
                 f"空转 seed_count={seed_count}",
             )
             return
+
+        # 停滞判定沿用本模块对"不推进的批次"的既有耐心上限，不另立阈值。
+        await crawl_batch_alerts.observe_progress(batch, stat, stall_after=self.INCOMPLETE_DISPATCH_TIMEOUT_SECONDS)
 
         # 批次并发额度只放行一部分 seed，剩下的要靠这里持续追派；不能等
         # active 归零再派，否则一个慢 seed 就把整批堵到派发超时。
@@ -235,11 +187,9 @@ class CrawlBatchStatusLoop:
             new_status = BatchStatus.COMPLETED.value
 
         if await self._cas_terminate(batch, new_status):
-            logger.info(
-                f"batch 状态推导: batch_id={batch.public_id} status={new_status} "
-                f"total={total} seed={seed_count} success={success} "
-                f"failed={failed} cancelled={cancelled}"
-            )
+            detail = f"total={total} seed={seed_count} success={success} failed={failed} cancelled={cancelled}"
+            logger.info(f"batch 状态推导: batch_id={batch.public_id} status={new_status} {detail}")
+            await crawl_batch_alerts.notify_settled(batch, new_status, detail)
 
     async def _fail_after_timeout(self, batch: CrawlBatch, timeout_seconds: int, detail: str) -> bool:
         """超过窗口仍没推进的 RUNNING 批次落 FAILED。返回是否已判定超时。"""
@@ -249,7 +199,9 @@ class CrawlBatchStatusLoop:
         if elapsed <= timeout_seconds:
             return False
         if await self._cas_terminate(batch, BatchStatus.FAILED.value):
-            logger.warning(f"batch 超时 FAILED: batch_id={batch.public_id} {detail} elapsed={elapsed:.0f}s")
+            settled_detail = f"{detail} elapsed={elapsed:.0f}s"
+            logger.warning(f"batch 超时 FAILED: batch_id={batch.public_id} {settled_detail}")
+            await crawl_batch_alerts.notify_settled(batch, BatchStatus.FAILED.value, settled_detail)
         return True
 
     @staticmethod
