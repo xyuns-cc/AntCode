@@ -1355,7 +1355,7 @@
       "path": "services/worker/src/antcode_worker/app/wiring.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 639
+      "value": 624
     },
     {
       "path": "services/worker/src/antcode_worker/cli.py",

@@ -1,4 +1,4 @@
-"""CA bundle policy for Worker -> control-plane HTTP calls.
+"""Proxy + CA bundle policy for Worker -> control-plane HTTP calls.
 
 httpx 的 ``trust_env`` 同时管两件互不相干的事：代理环境变量，以及
 ``SSL_CERT_FILE`` 提供的 CA bundle。Worker 对回环/单标签主机关掉 ``trust_env``
@@ -21,8 +21,29 @@ from __future__ import annotations
 
 import os
 import ssl
+from urllib.parse import urlparse
 
 CA_BUNDLE_ENV = "SSL_CERT_FILE"
+
+# 只在容器/主机本地可解析，外部代理无法路由过去。
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def should_trust_env_proxy(url: str) -> bool:
+    """返回 httpx ``trust_env`` 参数：该地址是否该受代理环境变量支配。
+
+    回环与**单标签**主机（compose 服务名 ``web-api``、内网短名 ``antcode-api``）只
+    在内部网络可解析，外部 ``HTTPS_PROXY`` 必然路由不到，照单全收等于把控制面调用
+    劫持进一条注定失败的链路。``normalize_api_base_url`` 也正是只对这两类主机放行
+    明文 HTTP —— 两处的"内部主机"判据必须一致，否则同一个地址会被一半代码当内网、
+    另一半当公网。
+
+    地址解析不出主机时同样不信任：连主机都拿不到就走代理是最不该有的默认值。
+    """
+    host = urlparse(url).hostname
+    if not host or host.lower() in _LOOPBACK_HOSTS:
+        return False
+    return "." in host or ":" in host
 
 
 def certificate_authority() -> ssl.SSLContext | bool:

@@ -330,21 +330,6 @@ def _normalize_api_base_url(
     )
 
 
-def _should_trust_env_proxy(api_base_url: str) -> bool:
-    try:
-        from urllib.parse import urlparse
-
-        host = urlparse(api_base_url).hostname
-    except Exception:
-        return True
-    if not host:
-        return True
-    host = host.lower()
-    if host in ("localhost", "127.0.0.1", "::1"):
-        return False
-    return True
-
-
 def _register_by_install_key(
     config: Any,
     credential_service: Any,
@@ -377,7 +362,7 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
         request_path_from_url,
     )
 
-    from antcode_worker.app.http_trust import certificate_authority
+    from antcode_worker.app.http_trust import certificate_authority, should_trust_env_proxy
 
     api_base_url = _normalize_api_base_url(
         getattr(config, "api_base_url", ""),
@@ -396,7 +381,7 @@ def _rotate_direct_redis_acl(config: Any, credentials: Any, credential_service: 
     )
     client = httpx.Client(
         timeout=15.0,
-        trust_env=_should_trust_env_proxy(api_base_url),
+        trust_env=should_trust_env_proxy(api_base_url),
         verify=certificate_authority(),
     )
     with client:

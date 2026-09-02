@@ -18,7 +18,7 @@ from antcode_core.common.utils.worker_request import (
 from loguru import logger
 
 from antcode_worker.app.control_plane_rejection import require_success_body
-from antcode_worker.app.http_trust import certificate_authority
+from antcode_worker.app.http_trust import certificate_authority, should_trust_env_proxy
 from antcode_worker.services.credential import WorkerCredentials
 from antcode_worker.services.credential.registration_intent import (
     RegistrationIntent,
@@ -162,7 +162,7 @@ def _post_json(url: str, body: bytes, *, headers: dict[str, str] | None = None) 
     request_headers = {"Content-Type": "application/json", **(headers or {})}
     client = httpx.Client(
         timeout=_HTTP_TIMEOUT_SECONDS,
-        trust_env=_should_trust_env_proxy(url),
+        trust_env=should_trust_env_proxy(url),
         verify=certificate_authority(),
     )
     with client:
@@ -195,15 +195,6 @@ def _validate_registration_response(data: dict[str, Any], registration_id: str) 
         raise RuntimeError("安装 Key V2 注册返回 recovered 无效")
     if not isinstance(data.get("recovery_expires_at"), str) or not data["recovery_expires_at"]:
         raise RuntimeError("安装 Key V2 注册返回恢复期限无效")
-
-
-def _should_trust_env_proxy(url: str) -> bool:
-    from urllib.parse import urlparse
-
-    host = urlparse(url).hostname
-    if not host or host.lower() in {"localhost", "127.0.0.1", "::1"}:
-        return False
-    return "." in host or ":" in host
 
 
 def _allow_plain_http(host: str, allow_insecure_internal: bool) -> bool:

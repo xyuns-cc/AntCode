@@ -3,10 +3,8 @@ import stat
 from pathlib import Path
 
 import pytest
-from antcode_worker.app.worker_registration import (
-    _should_trust_env_proxy,
-    normalize_api_base_url,
-)
+from antcode_worker.app.http_trust import should_trust_env_proxy
+from antcode_worker.app.worker_registration import normalize_api_base_url
 from antcode_worker.config import WorkerConfig
 from antcode_worker.services.credential.env_store import EnvCredentialStore
 from antcode_worker.services.credential.persistent_store import PersistentCredentialStore
@@ -82,8 +80,31 @@ def test_explicit_internal_http_allows_only_single_label_service() -> None:
 
 
 def test_internal_control_service_bypasses_environment_proxy() -> None:
-    assert _should_trust_env_proxy("http://web-api:8000") is False
-    assert _should_trust_env_proxy("https://control.example.com") is True
+    # 单标签主机是本部署实际用的地址（WORKER_API_BASE_URL=http://web-api:8000），
+    # 也是两份历史实现唯一分歧的输入——只测回环/带点主机会两份都绿。
+    assert should_trust_env_proxy("http://web-api:8000") is False
+    assert should_trust_env_proxy("https://antcode-api") is False
+    assert should_trust_env_proxy("http://localhost:8000") is False
+    assert should_trust_env_proxy("https://control.example.com") is True
+    assert should_trust_env_proxy("http://10.0.0.5:8000") is True
+
+
+def test_unparsable_control_service_url_does_not_trust_environment_proxy() -> None:
+    assert should_trust_env_proxy("") is False
+    assert should_trust_env_proxy("not a url") is False
+
+
+def test_both_worker_http_clients_share_one_proxy_policy() -> None:
+    """代理策略只允许存在一份定义——历史上 wiring/worker_registration 各有一份且结论相反。"""
+    import inspect
+
+    from antcode_worker.app import http_trust, wiring, worker_registration
+
+    assert worker_registration.should_trust_env_proxy is should_trust_env_proxy
+    for module in (wiring, worker_registration):
+        assert "def should_trust_env_proxy" not in inspect.getsource(module)
+        assert "def _should_trust_env_proxy" not in inspect.getsource(module)
+    assert "def should_trust_env_proxy" in inspect.getsource(http_trust)
 
 
 def test_persistent_credentials_survive_restart_and_precede_environment(monkeypatch, tmp_path: Path) -> None:
