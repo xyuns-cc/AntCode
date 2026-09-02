@@ -88,3 +88,19 @@ def test_core_redis_keys_default_is_a_literal_not_derived_from_env() -> None:
     assert "redis_namespace" not in core_source, "core RedisKeys 已跟随 REDIS_NAMESPACE，请撤掉本模块的裸构造禁令"
     assert "DEFAULT_NAMESPACE: ClassVar[str] = redis_namespace()" in worker_source
     assert CoreRedisKeys("tenant-a").spider_data_stream("run-1") != CoreRedisKeys().spider_data_stream("run-1")
+
+
+def test_core_redis_keys_does_not_shadow_the_task_plane_key_names() -> None:
+    """core 版本只管 spider 数据面与运行日志，任务面 key 归 ``control_plane``。
+
+    这四个名字曾在 core 侧有一份零生产调用方的副本，其中 ``heartbeat_key``
+    与 ``consumer_group_name`` 生成的 key 与权威实现不同——用错副本会静默
+    读到空数据。断言 worker 侧仍在，否则删错边时本条会假通过。
+    """
+    from antcode_core.infrastructure.redis.keys import RedisKeys as CoreRedisKeys
+    from antcode_worker.transport.redis.keys import RedisKeys as WorkerRedisKeys
+
+    task_plane = ("task_ready_stream", "task_result_stream", "heartbeat_key", "consumer_group_name")
+
+    assert [name for name in task_plane if hasattr(WorkerRedisKeys, name)] == list(task_plane)
+    assert [name for name in task_plane if hasattr(CoreRedisKeys, name)] == []

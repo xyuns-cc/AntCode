@@ -1,6 +1,10 @@
-"""Redis Key 命名规范
+"""Spider 数据面与运行日志的 Redis Key 命名。
 
-定义统一的 Redis Key 命名规则，避免 Key 冲突。
+任务分发 / 心跳 / 消费组的 key 不归本类：权威定义是 ``control_plane``
+的模块级函数，Master、Gateway、Worker 全走它。本类曾有一份同名同签名的
+副本，且 ``heartbeat_key``（``{ns}:worker:heartbeat:*`` vs 权威的
+``{ns}:heartbeat:*``）与 ``consumer_group_name``（``ns:workers`` vs
+``ns-workers``）生成的是没人读写的 key，已删——不要再往回加。
 """
 
 
@@ -9,15 +13,8 @@ class RedisKeys:
 
     DEFAULT_NAMESPACE = "antcode"
 
-    # === 任务相关 ===
-    TASK_READY_PREFIX = "task:ready"
-    TASK_RESULT_PREFIX = "task:result"
-
     # === 日志相关 ===
     LOG_STREAM_PREFIX = "log:stream"
-
-    # === Worker 相关 ===
-    WORKER_HEARTBEAT_PREFIX = "worker:heartbeat"
 
     # === Spider 相关 ===
     SPIDER_INDEX_PREFIX = "spider:index"
@@ -33,20 +30,8 @@ class RedisKeys:
         return f"{{{self.namespace}}}:{key}"
 
     # === 命名空间实例方法 ===
-    def task_ready_stream(self, worker_id: str) -> str:
-        return self._slot(f"{self.TASK_READY_PREFIX}:{worker_id}")
-
-    def task_result_stream(self) -> str:
-        return self._ns(self.TASK_RESULT_PREFIX)
-
-    def heartbeat_key(self, worker_id: str) -> str:
-        return self._slot(f"{self.WORKER_HEARTBEAT_PREFIX}:{worker_id}")
-
     def log_stream_key(self, run_id: str) -> str:
         return self._ns(f"{self.LOG_STREAM_PREFIX}:{run_id}")
-
-    def consumer_group_name(self) -> str:
-        return self._ns("workers")
 
     def spider_data_stream(self, run_id: str) -> str:
         return self._slot(f"spider:{run_id}:data")

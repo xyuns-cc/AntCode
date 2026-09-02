@@ -22,35 +22,6 @@ class TestRedisKeys:
 
         assert keys.namespace == "myapp"
 
-    def test_task_ready_stream(self):
-        """测试任务就绪流键"""
-        keys = RedisKeys()
-
-        key = keys.task_ready_stream("worker-001")
-
-        assert "antcode" in key
-        assert "worker-001" in key
-        assert "ready" in key
-
-    def test_task_result_stream(self):
-        """测试任务结果流键"""
-        keys = RedisKeys()
-
-        key = keys.task_result_stream()
-
-        assert "antcode" in key
-        assert "result" in key
-
-    def test_heartbeat_key(self):
-        """测试心跳键"""
-        keys = RedisKeys()
-
-        key = keys.heartbeat_key("worker-001")
-
-        assert "antcode" in key
-        assert "heartbeat" in key
-        assert "worker-001" in key
-
     def test_log_stream_key(self):
         """测试日志流键"""
         keys = RedisKeys()
@@ -60,14 +31,6 @@ class TestRedisKeys:
         assert "antcode" in key
         assert "log" in key
         assert "exec-001" in key
-
-    def test_consumer_group_name(self):
-        """测试消费者组名"""
-        keys = RedisKeys()
-
-        group = keys.consumer_group_name()
-
-        assert "workers" in group
 
     def test_spider_keys(self):
         """测试爬虫相关键"""
