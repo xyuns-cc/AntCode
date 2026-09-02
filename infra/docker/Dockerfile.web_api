@@ -89,6 +89,7 @@ COPY --chown=appuser:appgroup packages/antcode_contracts/src/antcode_contracts /
 COPY --chown=appuser:appgroup services/web_api/src/antcode_web_api /app/services/web_api/src/antcode_web_api
 COPY --chown=appuser:appgroup \
     scripts/__init__.py \
+    scripts/check_ready_streams.py \
     scripts/crawl_redis_preflight.py \
     scripts/crawl_redis_preflight_contract.py \
     scripts/crawl_redis_preflight_execution.py \

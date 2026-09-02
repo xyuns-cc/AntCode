@@ -9,8 +9,9 @@
   —— ``ProcessExecutor._build_env`` 按 C1 allowlist 刻意不传 secrets；
 - e2e / 级联删除只连 Redis 的 Spider 存储清理；
 - 生产 compose 的 ``crawl-redis-preflight`` 服务（``docker-compose.prod.middleware.yml``）
-  按最小权限**只挂 Redis secret**，却要跑 ``scripts.check_ready_streams``（runbook §4.1
-  的排空门禁）与 ``scripts.crawl_redis_preflight``（``deploy-production.sh`` 的必经步骤）。
+  按最小权限**只挂 Redis secret**，却要跑 ``scripts.check_ready_streams``（停机窗口里
+  轮询等 ready stream 排空）与 ``scripts.crawl_redis_preflight``（``deploy-production.sh``
+  的必经步骤）。
   这两条曾经通过 ``common.security`` 聚合包间接拖进 ``settings``，导致部署**必然在该
   步骤崩溃**——真机实测出来的，不是理论风险。
 
