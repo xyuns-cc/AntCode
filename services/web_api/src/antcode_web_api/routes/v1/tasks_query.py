@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from antcode_core.application.services.base import QueryHelper
 from antcode_core.application.services.scheduler.scheduler_service import scheduler_service
 from antcode_core.common.security.auth import get_current_user
 from antcode_core.domain.models import Project, Task, TaskRun
@@ -26,7 +27,6 @@ from fastapi import Depends, HTTPException, Query
 from antcode_web_api.response import (
     ExecutionResponseBuilder,
     Messages,
-    TaskResponseBuilder,  # noqa: F401  (kept for parity with tasks.py imports)
 )
 from antcode_web_api.response import (
     page as page_response,
@@ -50,7 +50,14 @@ async def _running_task_map(runs: list[TaskRun]) -> dict[int, Task]:
     return {task.id: task for task in await Task.filter(id__in=task_ids).only("id", "public_id", "name")}
 
 
-def _running_task_item(run: TaskRun, task: Task | None) -> dict[str, Any]:
+async def _running_worker_map(runs: list[TaskRun]) -> dict[int, str]:
+    """TaskRun.worker_id 是 Worker 表的内部自增 ID,前端 Worker 列表用 public_id。"""
+    worker_ids = list({run.worker_id for run in runs if run.worker_id is not None})
+    workers = await QueryHelper.batch_get_worker_info(worker_ids)
+    return {worker_id: info["public_id"] for worker_id, info in workers.items()}
+
+
+def _running_task_item(run: TaskRun, task: Task | None, worker_public_id: str | None) -> dict[str, Any]:
     return {
         "task_id": task.public_id if task else None,
         "task_name": task.name if task else None,
@@ -58,7 +65,7 @@ def _running_task_item(run: TaskRun, task: Task | None) -> dict[str, Any]:
         "status": run.status.value if hasattr(run.status, "value") else run.status,
         "start_time": run.start_time.isoformat() if run.start_time else None,
         "created_at": run.created_at.isoformat() if run.created_at else None,
-        "worker_id": run.worker_id,
+        "worker_id": worker_public_id,
         "retry_count": run.retry_count,
     }
 
@@ -72,10 +79,8 @@ async def get_running_tasks(
 ):
     """获取运行中的任务（带分页）
 
-    P2-15: 之前调用的 `scheduler_service.get_running_tasks()` 并不存在，
-    命中即 500。这里改成直接查 TaskRun：取 DISPATCHING / QUEUED /
-    RUNNING 三种"正在进行中"的执行记录，非管理员按 Task.user_id
-    做归属过滤，最多返回 running_task_hard_cap 条防止响应体爆炸。
+    非管理员按 Task.user_id 做归属过滤；最多取 running_task_hard_cap
+    条防止响应体爆炸。
     """
     running_statuses = [
         TaskStatus.DISPATCHING.value,
@@ -90,7 +95,8 @@ async def get_running_tasks(
         run_query = run_query.filter(task_id__in=allowed_task_ids)
     runs = await run_query.order_by("-created_at").limit(running_task_hard_cap)
     tasks_by_id = await _running_task_map(runs)
-    items = [_running_task_item(run, tasks_by_id.get(run.task_id)) for run in runs]
+    workers_by_id = await _running_worker_map(runs)
+    items = [_running_task_item(run, tasks_by_id.get(run.task_id), workers_by_id.get(run.worker_id)) for run in runs]
     paginated = items[offset : offset + limit]
     return success_response(paginated, message=Messages.QUERY_SUCCESS)
 
@@ -295,13 +301,6 @@ def register_query_routes(router, *, running_task_hard_cap: int) -> None:
         limit: int = Query(100, ge=1, le=500),
         current_user=Depends(get_current_user),
     ):
-        """获取运行中的任务（带分页）
-
-        P2-15: 之前调用的 `scheduler_service.get_running_tasks()` 并不存在，
-        命中即 500。这里改成直接查 TaskRun：取 DISPATCHING / QUEUED /
-        RUNNING 三种"正在进行中"的执行记录，非管理员按 Task.user_id
-        做归属过滤，最多返回 200 条防止响应体爆炸。
-        """
         return await get_running_tasks(
             offset=offset,
             limit=limit,

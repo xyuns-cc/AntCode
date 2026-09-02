@@ -1145,7 +1145,7 @@
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks_query.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 375
+      "value": 374
     },
     {
       "path": "services/web_api/src/antcode_web_api/routes/v1/tasks_transfer.py",
