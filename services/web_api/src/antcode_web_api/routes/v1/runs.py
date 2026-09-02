@@ -315,7 +315,7 @@ async def download_run_artifact(
 # ---------------------------------------------------------------------------
 # O2: 爬虫数据链闭环
 #
-# worker 端 RuleSpider / Scrapy 通过 SpiderDataReporter 把抓到的 items 写到
+# worker 端 UniversalRuleSpider / Scrapy 通过 SpiderDataReporter 把抓到的 items 写到
 # Redis stream ``{namespace}:spider:<run_id>:data``。此处对外暴露列表端点，让前端"抓取
 # 数据"tab 能看到 items。权限走 ``scheduler_service.get_execution_with_permission``。
 # ---------------------------------------------------------------------------

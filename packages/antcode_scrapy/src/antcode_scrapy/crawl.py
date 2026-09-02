@@ -74,7 +74,7 @@ def _run(rule: dict[str, Any]) -> int:
     settings = build_settings(rule)
     process = CrawlerProcess(settings=settings, install_root_handler=True)
 
-    # 用 crawl_defer 拿到 Crawler 对象，close 时读 stats
+    # 先 create_crawler 拿到 Crawler 对象，才能在 close 后读 stats
     crawler = process.create_crawler(UniversalRuleSpider)
     process.crawl(crawler, rule=rule, run_id=run_id, project_id=project_id)
     process.start()  # 阻塞直到所有 spider 结束

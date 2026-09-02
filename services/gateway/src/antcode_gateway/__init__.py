@@ -6,7 +6,7 @@ gRPC 网关服务，负责：
 - 认证与授权（mTLS/API Key/JWT）
 - 请求限流与熔断
 - 代理 Worker poll 任务（从 Redis Streams 读取）
-- 接收日志写入 log:{run_id} stream
+- 接收日志整批写入全局 <namespace>:log:ingest stream（不再按 run_id 拆流）
 - 接收结果并回写 PostgreSQL
 
 职责边界：

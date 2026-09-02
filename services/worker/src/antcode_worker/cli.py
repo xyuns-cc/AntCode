@@ -1,6 +1,6 @@
 """命令行入口
 
-使用 HealthServer (aiohttp) 替代 FastAPI 提供健康检查端点。
+使用 ObservabilityServer (aiohttp) 替代 FastAPI 提供健康检查端点。
 支持 Direct 模式（内网直连 Redis）和 Gateway 模式（公网走 gRPC）。
 支持 run, doctor, print-config 命令。
 

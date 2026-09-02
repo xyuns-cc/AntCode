@@ -244,11 +244,11 @@ class ControlDecoder:
 
         新协议下 ``RuntimeControl``:
           - ``request_id``: correlation id（必填，用于 AckControl 回报）
-          - ``action``: 路由用的 action 名（legacy，保留兼容）
+          - ``action``: 路由用的 action 名（**主字段**，引擎按它查表）
           - ``params``: ``map<string,string>``，顶层参数（如 reply_stream）
-          - ``action_typed``: ``RuntimeAction`` oneof（首选）；当前只填充
-            ``generic`` 分支，``generic.name`` 与 ``action`` 同源，
-            ``generic.args`` 是真正的任务参数（与旧 ``payload`` 等价）。
+          - ``action_typed``: ``RuntimeAction`` oneof；当前只填充 ``generic``
+            分支，``generic.name`` 与 ``action`` 同源、仅在 ``action`` 为空时兜底
+            回填，``generic.args`` 是真正的任务参数（与旧 ``payload`` 等价）。
 
         引擎层（``_handle_runtime_control``）继续按 ``action`` 路由 + 按字段名
         从 ``args`` 取值；不再用 ``payload_json`` 和 ``reply_stream`` 字段。

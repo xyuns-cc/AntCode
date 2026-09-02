@@ -294,7 +294,7 @@ class GatewayControlService(ControlServiceServicer):
         return control_pb2.DeregisterResponse(success=True)
 
     # =========================================================================
-    # Lease (heartbeat 替身 - 真实 lease 状态机 TODO P3)
+    # Lease (LeaseStore 已接管租约状态机；heartbeat Hash 只是旁路的 dashboard 视图)
     # =========================================================================
 
     async def Lease(

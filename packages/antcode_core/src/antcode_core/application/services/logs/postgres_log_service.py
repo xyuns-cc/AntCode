@@ -178,7 +178,7 @@ class PostgresLogService:
         # 不吞异常：DB 故障必须显式冒泡，绝不能返 [] 伪装成"没有历史日志"。
         # 之前 debug + return [] 让 task_logs 表不存在 / 权限缺失 / 连接池打满
         # 全部退化成 UI 空白，用户完全无感知。上游（web_api 路由 /
-        # ingest_follower.fetch_history）会把异常转成 5xx 或结构化错误。
+        # ingest_follower.history_reader）会把异常转成 5xx 或结构化错误。
         try:
             _, rows = await conn.execute_query(sql, params)
         except Exception:

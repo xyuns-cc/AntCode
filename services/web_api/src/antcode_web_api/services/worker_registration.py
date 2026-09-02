@@ -197,7 +197,7 @@ async def _recover_registration(
     # 恢复注册就是重新引导：Worker 进程刚起来、还没有 Lease，也就还没有心跳。
     # Lease 资格白名单是 {connecting, online}，若把它留在 offline，它永远拿不到
     # 首个 Lease。回到 connecting 同时刷新 updated_at，为心跳监控的引导窗口
-    # （worker_heartbeat_service._is_bootstrapping）提供锚点。
+    # （worker_liveness.is_within_bootstrap_window）提供锚点。
     if worker.status != WorkerStatus.CONNECTING.value:
         worker.status = WorkerStatus.CONNECTING.value
         await worker.save(update_fields=["status", "updated_at"])

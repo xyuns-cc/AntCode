@@ -22,7 +22,9 @@ from antcode_core.infrastructure.redis import task_result_stream
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from loguru import logger
 
-# Status 字符串 -> data_pb2.Status enum 的映射（用于兼容旧调用方传入字符串）
+# Status 字符串 -> data_pb2.Status enum 的映射。只被 ``handle_status_update`` 用，
+# 而后者**当前没有任何调用方**（生产走 ``ResultHandler.handle(TaskStatus)`` 收 typed
+# proto）；别把它当成活的兼容层。
 _STATUS_FROM_STR: dict[str, data_pb2.Status] = {
     "": data_pb2.STATUS_UNSPECIFIED,
     "pending": data_pb2.STATUS_PENDING,

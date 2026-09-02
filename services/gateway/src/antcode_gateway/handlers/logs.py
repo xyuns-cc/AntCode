@@ -60,7 +60,8 @@ def _positive_limit(name: str, value: int) -> int:
 class LogHandler:
     """日志处理器
 
-    接受 ``LogBatch`` Proto 消息，按 ``run_id`` 拆分后写入对应日志 Stream，
+    接受 ``LogBatch`` Proto 消息，整批写入全局 ``<namespace>:log:ingest`` Stream
+    （**不再按 run_id 拆流**，路由由 Master 按 ``entry.run_id`` 做），
     每条 Stream 消息即一个 ``LogBatch`` Proto 的序列化字节（单字段 'p'）。
     """
 
@@ -169,7 +170,8 @@ class LogHandler:
         )
 
     # =========================================================================
-    # 查询/清理 - 维持原接口，给 web_api / 调试用
+    # 查询/清理 - 旧 per-run stream 的读路径。**当前无生产调用方**：web_api 不
+    # import antcode_gateway，日志查询走它自己的 streams/ + postgres_log_service。
     # =========================================================================
 
     async def get_logs(

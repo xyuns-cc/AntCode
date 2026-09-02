@@ -7,8 +7,8 @@
 P1c 改造：
 - 旧 ``SendHeartbeat`` RPC 已删除，统一由 ``ControlService.Lease`` 携带 Metrics。
 - 旧 ``HeartbeatHandler`` 保留接口、改名暴露为 ``LeaseHandler``，由 control_service
-  直接调用。**这里 *只* 维护过渡期的 Hash 视图**；真正的 lease 状态机由 P3
-  接管（``LeaseStore`` + 强一致 lease_id）。
+  直接调用。**这里 *只* 维护运维 dashboard 的 Hash 视图**；真正的 lease 状态机由
+  ``LeaseStore``（强一致 lease_id）承担，它已经上线，与本模块长期并存。
 
 **Validates: Requirements 6.3**
 """
@@ -221,7 +221,7 @@ class HeartbeatHandler:
             return False
 
 
-# P1c：control_service.Lease 调用方使用的别名（语义更准确）。
-# 等 P3 接管真实 LeaseStore 后会被替换为新的 ``LeaseStore`` 实现。
+# control_service.Lease 调用方使用的别名（语义更准确）。``LeaseStore`` 已经接管
+# 租约状态机，但**没有**取代这里：两者长期共存，本处只写运维 dashboard 的 Hash 视图。
 LeaseHandler = HeartbeatHandler
 LeaseData = HeartbeatData

@@ -3,8 +3,8 @@
 **跨包契约（不可改动）**：
 - stream key = ``{{namespace}}:spider:<run_id>:data``
 - 字段名/类型必须与 ``antcode_worker.plugins.spider.data.models
-  .SpiderDataItem.to_redis_dict()`` 逐字节一致，否则 web_api
-  ``routes/v1/runs.py`` 里的 ``SpiderDataItem.from_redis_dict()`` 会解析失败
+  .SpiderDataItem.to_redis_dict()`` 逐字节一致，否则同模块的
+  ``SpiderDataItem.from_redis_dict()``（读取方 ``spider/data/reader.py``）会解析失败
 - 元数据 key = ``{{namespace}}:spider:<run_id>:meta`` （Hash）
 - 活动/过期索引 = ``{{namespace}}:spider:index:<project_id>`` / ``...:expiry:<project_id>``
 
@@ -125,10 +125,10 @@ class AntCodeRedisPipeline:
     def _normalize_write_result(result: Any) -> tuple[bool, int]:
         """兼容 sink.write_item 返回 ``bool`` 或 ``(ok, n_written)``。
 
-        - RedisSpiderDataSink (direct 模式) 每条一次 xadd → 老式 bool
-          语义: True 表示这一条落地，n_written=1；False 表示这条丢，n_written=0
-        - GatewaySpiderDataSink 走 batch flush → 新式 ``(ok, n_written)``
-          语义: n_written 是本次 flush 真正 ack 的条数（未 flush 时为 0）
+        两个分支都是活的：
+        - ``SpoolSpiderDataSink.write_item`` 逐条落盘 → ``bool``，True 记 n_written=1
+        - ``GatewaySpiderDataSink`` 走 batch flush → ``(ok, n_written)``，
+          n_written 是本次 flush 真正 ack 的条数（未 flush 时为 0）
         """
         if isinstance(result, tuple) and len(result) == 2:
             ok, n = result
@@ -140,8 +140,8 @@ class AntCodeRedisPipeline:
     def _normalize_close_result(result: Any) -> tuple[bool, int]:
         """兼容 sink.close 返回 ``None`` 或 ``(ok, remaining)``。
 
-        - 老式返回 None：视为成功、无剩余（保持 direct 模式向后兼容）
-        - 新式返回 ``(ok, remaining)``：ok=False 或 remaining>0 都视为失败
+        两个分支都是活的：``SpoolSpiderDataSink.close`` 声明 ``-> None``，返回 None
+        即成功、无剩余；返回 ``(ok, remaining)`` 时 ok=False 或 remaining>0 均为失败。
         """
         if isinstance(result, tuple) and len(result) == 2:
             ok, remaining = result
@@ -161,7 +161,7 @@ class AntCodeRedisPipeline:
         self._sequence += 1
         payload_dict = dict(item)
         url = str(payload_dict.pop("_url", "") or "")
-        # R1-P1-10: DedupPipeline 挂的延迟提交信息，不进 data 字段
+        # R1-P1-10: AntCodeDedupPipeline 挂的延迟提交信息，不进 data 字段
         dedup_commit = payload_dict.pop("_antcode_dedup", None)
 
         data_json = json.dumps(payload_dict, ensure_ascii=False)

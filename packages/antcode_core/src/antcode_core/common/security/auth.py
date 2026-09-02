@@ -227,15 +227,15 @@ class JWTAuth:
         expected_type: str | None = "access",
         expected_class: str | None = "web",
     ) -> TokenData:
-        """验证令牌
-
-        默认 ``verify_exp=True``、``verify_type=True``、``verify_class=True``。
+        """默认 ``verify_exp=True``、``verify_type=True``、``verify_class=True``。
         调用方若需放宽必须显式传 ``expected_type=None`` / ``expected_class=None``,
         **不允许跳过过期校验**。
 
         P0-a1: token_class 用于隔离 Web 用户会话(``web``)与 Worker 凭据(``worker``),
         Gateway 侧强制 ``expected_class="worker"``,防止普通 Web access JWT 冒充 Worker。
-        为向后兼容,payload 里没有 ``token_class`` 字段时视为 ``"web"``。
+        **只有 ``create_worker_token`` 写这个字段**；Web 的 access/refresh/action token
+        一律不带，靠 ``_verify_token_claims`` 里 ``.get("token_class", "web")`` 的默认值
+        归类——那不是兼容包袱而是每个 Web 会话的活路径，改成必填 claim 会打挂全部登录。
         """
         try:
             # 显式强制启用过期校验,杜绝 verify_exp=False 旁路

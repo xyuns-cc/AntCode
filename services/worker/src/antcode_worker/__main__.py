@@ -1,7 +1,7 @@
 """
 AntCode Worker 入口
 
-使用 HealthServer (aiohttp) 提供健康检查端点。
+使用 ObservabilityServer (aiohttp) 提供健康检查端点。
 
 Requirements: 7.1
 """

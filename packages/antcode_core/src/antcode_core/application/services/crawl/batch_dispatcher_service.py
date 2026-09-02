@@ -276,7 +276,7 @@ class CrawlBatchDispatcherService:
             from antcode_core.application.services.workers import worker_task_dispatcher
 
             # R1-P0-1 (审查报告): rule_detail 必须塞在 ``params.kwargs`` 里，否则 worker
-            # engine._build_task_payload 会取到空 dict 而报"缺少 target_url"；crawl_batch_id
+            # engine._build_payload 会取到空 dict 而报"缺少 target_url"；crawl_batch_id
             # 保留顶层供审计追溯。batch.timeout 是单次 HTTP 超时，不能当整进程任务超时。
             task_timeout = DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS
             result = await worker_task_dispatcher.dispatch_task(

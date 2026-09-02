@@ -1257,17 +1257,9 @@ class RedisTransport(LeaseGenerationMixin, TransportBase):
         spider_name: str,
         **kwargs: Any,
     ):
-        """
-        获取爬虫数据上报器
+        """**永远抛异常**：Direct Redis Spider reporter 已停用，没有可返回的上报器。
 
-        Args:
-            run_id: 运行 ID
-            project_id: 项目 ID
-            spider_name: 爬虫名称
-            **kwargs: 其他配置
-
-        Returns:
-            RedisDataReporter 实例
+        保留签名只为让老调用点撞到明确的错误而不是 AttributeError。
         """
         raise RuntimeError("Direct Redis Spider reporter 已停用；请通过 Worker transport 的可信控制面上报")
 

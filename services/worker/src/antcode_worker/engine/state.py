@@ -91,7 +91,11 @@ class StateManager:
         self._lock = asyncio.Lock()
 
     async def add(self, run_id: str, task_id: str, receipt: str | None = None) -> RunInfo:
-        """添加新运行；已存在直接返回旧的（保留旧行为，供 legacy 调用点）。"""
+        """添加新运行；已存在直接返回旧的。
+
+        生产代码一律走 ``add_if_new``（engine 要靠 ``is_new`` 判重）；本方法目前
+        只有测试在用，别按"生产路径"去改它的语义。
+        """
         info, _ = await self.add_if_new(run_id, task_id, receipt=receipt)
         return info
 

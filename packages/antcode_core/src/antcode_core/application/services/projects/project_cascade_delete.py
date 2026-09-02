@@ -18,9 +18,12 @@ P1-DB-03: 事务提交后按 run 级 advisory lock 串行化清扫日志残留
 （计划任务 run / 爬取批次 run）都会被检查，任一在途即拒绝删除。
 
 **已知残留**：批次 run 的 ``TaskRun`` 行不随项目删除被清掉。它们的批次身份埋在
-``result_data`` JSON 里且无表达式索引，按项目批量删只能扫遍哨兵族全表——那会在
-持有 Project/Task/CrawlBatch 行锁的事务里拖住调度器。根治需先给
-``task_executions`` 加一列带索引的 ``crawl_batch_id``，属独立的 schema 变更。
+``result_data`` JSON 里。**拦路的不是索引**——``idx_task_executions_crawl_batch_id``
+/ ``idx_task_executions_crawl_batch_status`` 两条表达式索引就建在
+``result_data->>'crawl_batch_id'`` 上（见 ``scripts/init_db_indexes.py``）——拦路的
+是 ORM：Tortoise 的 JSON 过滤在 sqlite 执行器上直接抛 ``NotImplementedError``，
+而单测跑在 sqlite 上，所以写不出按项目批量删的 SQL。同一件事的详细论证见
+``project_delete_scope._batch_runs_active`` 的 docstring。
 """
 
 from typing import cast
@@ -181,7 +184,7 @@ async def _publish_task_logs_purge_events(conn, project_id, run_ids: list[str]) 
 
     每批 ≤ 200 run_id, 避免单事件 payload 过大。事件与删除同事务提交,
     保证 "TaskRun 已删且 log purge 事件已入库" 的原子性;崩溃后 outbox
-    publisher 重投, scheduler_event_loop._purge_task_logs 消费兜底。
+    publisher 重投, scheduler_event_handlers.purge_task_logs 消费兜底。
     """
     from antcode_core.application.services.scheduler.outbox_service import (
         scheduler_outbox_service,

@@ -1,7 +1,8 @@
 """Redis 共享熔断器单例。
 
-将既有的 ``CircuitBreaker`` 封装为 ``redis_circuit`` 单例供 client / transport
-层共用，达到「连续 N 次连接/操作失败后快速失败、过段时间再放行」的目的。
+把 ``CircuitBreaker`` 封装成一个按 ``_BREAKER_NAME`` 复用的单例，经
+``get_redis_circuit_breaker()`` 供 client / transport 层共用，达到「连续 N 次
+连接/操作失败后快速失败、过段时间再放行」的目的。
 """
 
 from __future__ import annotations

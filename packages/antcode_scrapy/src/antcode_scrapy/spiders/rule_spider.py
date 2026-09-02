@@ -3,12 +3,12 @@
 规则来自前端表单，经 ``ProjectRule.to_dispatch_dict()`` 序列化后传入。
 对 Scrapy 的适配层只做三件事：
 
-1. ``start_requests`` — 用 rule.target_url 起初始请求，engine=playwright
-   时给 meta 挂 ``playwright: True`` 让 scrapy-playwright 接管下载。
+1. ``start``（Scrapy 2.13+ 取代 ``start_requests``）— 用 rule.target_url 起初始
+   请求，engine=playwright 时给 meta 挂 ``playwright: True`` 交 scrapy-playwright。
 2. ``parse`` — 用 rule.extraction_rules 里的每条 (desc, type, expr) 从
    Scrapy Selector 抽取，一页产出一条 dict 交给 pipeline。
-3. ``pagination`` — 简单 next_page_rule（CSS/XPath）驱动分页，受
-   ``max_pages`` 限。
+3. ``_next_request`` / ``_infer_pagination_method`` / ``_build_page_url`` —
+   next_page_rule（CSS/XPath）或页码占位符驱动分页，受 ``max_pages`` 限。
 
 **契约兼容点**：抽取表达式（css/xpath/regex）语法与旧 spiderkit 完全
 一致，因为 spiderkit 的 Selector 本就是仿 Scrapy 的 parsel；前端已保存的

@@ -1,8 +1,9 @@
 """T7-B4a (P1-2): 登录专项限流 + 账户锁定。
 
 **为什么单独一个 guard**：
-- 全局 `RateLimitMiddleware` 是 100 req/60s per IP，对密码喷洒来说太宽——
-  攻击者每分钟能试 100 个密码。登录端点需要**更严格**的 IP 限流
+- 全局 `RateLimitMiddleware` 按 ``settings.RATE_LIMIT_CALLS/RATE_LIMIT_PERIOD``
+  生效，默认 1000 req/60s per IP，对密码喷洒来说太宽——攻击者每分钟能试
+  1000 个密码。登录端点需要**更严格**的 IP 限流
   （默认 5/min）和**独立的用户名级**限流（10/15min），以及**账户锁定**
   机制（连续失败 5 次锁 15 分钟）。
 - 复用现成的 ``RedisRateLimiter``（滑动窗口 Lua 原子）+ 简单计数 key。
