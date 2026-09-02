@@ -5,7 +5,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from antcode_core.application.services.workers.worker_resource_probe import persisted_worker_metrics
+from antcode_core.application.services.workers.worker_resource_probe import readable_worker_metrics
 from antcode_core.domain.models import Worker, WorkerHeartbeat, WorkerStatus
 from antcode_core.domain.schemas.worker import WorkerAggregateStats
 
@@ -39,20 +39,22 @@ class WorkerStatsService:
         total_rpm = 0.0
 
         for worker in workers:
-            # 这一列的读取契约在 persisted_worker_metrics：坏列降级成"这台没上报过"，
-            # 只把它排除在均值分母之外，不让它把整个集群统计打成 500。
-            metrics = persisted_worker_metrics(worker)
-            if metrics:
-                total_projects += metrics.get("projectCount", 0)
-                total_tasks += metrics.get("taskCount", 0)
-                running_tasks += metrics.get("runningTasks", 0)
-                total_envs += metrics.get("envCount", 0)
-                total_cpu += metrics.get("cpu", 0)
-                total_memory += metrics.get("memory", 0)
+            # "有没有指标"的判定在 readable_worker_metrics：与 GET /workers 同一个
+            # WorkerMetrics 读回 schema。读不回来的那台整体退出统计（分子分母都不进），
+            # 而不是当成 cpu=0 计入分母——那会让均值被一台页面上写着没数据的机器带偏。
+            # 取值也随之由 schema 兜住：从前 {"cpu": "abc"} 会把整个接口打成 500。
+            metrics = readable_worker_metrics(worker)
+            if metrics is not None:
+                total_projects += metrics.projectCount
+                total_tasks += metrics.taskCount
+                running_tasks += metrics.runningTasks
+                total_envs += metrics.envCount
+                total_cpu += metrics.cpu
+                total_memory += metrics.memory
                 workers_with_metrics += 1
 
                 # 聚合爬虫统计
-                spider_stats = metrics.get("spider_stats")
+                spider_stats = metrics.spider_stats
                 if spider_stats:
                     req_count = spider_stats.get("request_count", 0)
                     resp_count = spider_stats.get("response_count", 0)

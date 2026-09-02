@@ -25,8 +25,10 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from loguru import logger
+from pydantic import ValidationError
 
 from antcode_core.application.services.workers.worker_metrics import normalize_worker_metrics
+from antcode_core.domain.schemas.worker import WorkerMetrics
 from antcode_core.infrastructure.redis import worker_heartbeat_key
 
 
@@ -101,6 +103,38 @@ def persisted_worker_metrics(worker: Any) -> Mapping[str, Any] | None:
         type(raw).__name__,
     )
     return None
+
+
+def readable_worker_metrics(worker: Any) -> WorkerMetrics | None:
+    """按读回 schema 解这一列；解不出就是"这台没有可用指标"——与 ``GET /workers`` 同一判定。
+
+    ``persisted_worker_metrics`` 只管形状（是不是 JSON 对象），拿形状当"有没有指标"用，会
+    与读回侧对不上：``GET /workers`` 用 ``WorkerMetrics``（``extra="forbid"``）读同一列，
+    键集漂移的那台在页面上是 ``metrics: null`` + ``snapshotErrors``，在集群统计里却照样进
+    分母。真机实测（一台 cpu=12 的好机器同批）：Worker 多报一个 ``gpuUtil`` → ``avgCpu`` 50，
+    把页面上写着读不回来的那台的 88 算了进去；Worker 把 cpu 改名成 ``cpuUsage`` → ``avgCpu``
+    6，``.get("cpu", 0)`` 把"没有这个键"折算成 0，均值被一台没数据的机器减半。同一台机器被
+    两个接口算成两回事，均值就没有口径可言。
+
+    取值同样信不过：``{"cpu": "abc"}`` 过得了形状检查，``total_cpu += "abc"`` 是 TypeError，
+    整个 ``GET /workers/stats`` 打成 500（真机实测），而同一台在 ``GET /workers`` 上只是自己
+    那一列置空。
+
+    读不回来是这一台的数据问题，不牵连同批的好机器：本台整体退出统计（分子分母都不进），
+    而不是折算成 cpu=0 —— 那是把"未知"写成一个具体读数。
+    """
+    persisted = persisted_worker_metrics(worker)
+    if not persisted:
+        return None
+    try:
+        return WorkerMetrics(**persisted)
+    except ValidationError as exc:
+        logger.warning(
+            "Worker [{}] 的 metrics 列读不回 WorkerMetrics，本轮不计入集群统计（键: {}）",
+            worker.name,
+            ", ".join(sorted({".".join(str(part) for part in error["loc"]) for error in exc.errors()})),
+        )
+        return None
 
 
 async def probe_worker_resources(worker: Any) -> dict[str, float | int]:
@@ -197,5 +231,6 @@ __all__ = [
     "persisted_worker_metrics",
     "probe_failure_suffix",
     "probe_worker_resources",
+    "readable_worker_metrics",
     "warn_unreadable_workers",
 ]
