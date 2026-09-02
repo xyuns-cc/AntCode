@@ -18,8 +18,6 @@ AntCode Contracts - gRPC 契约包
     from antcode_contracts import artifact_pb2_grpc, control_pb2_grpc, data_pb2_grpc
 """
 
-__version__ = "0.1.0"
-
 # 导出将在 proto 生成后可用
 __all__ = [
     "artifact_pb2",

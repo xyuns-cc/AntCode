@@ -27,7 +27,6 @@ dependencies = [
     "ujson>=5.13.0",
     "pytz>=2024.1",
     # 高性能序列化与压缩
-    "msgpack>=1.2.1",
     "lz4>=4.3.0",
     # HTTP 客户端（alert channel / http_client 用）
     "httpx[http2]>=0.28.1",

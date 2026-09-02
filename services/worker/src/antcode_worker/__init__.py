@@ -16,7 +16,3 @@ antcode_worker.executor.rule_network_relay`` 启动的 relay 会先执行本文�
 聚合导入会把整个 engine/transport 栈拉进来并实例化控制面 ``Settings()``；
 沙箱按 C1 allowlist 刻意不继承 DATABASE_URL，relay 因此直接导入失败。
 """
-
-__version__ = "0.1.0"
-
-__all__ = ["__version__"]

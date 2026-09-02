@@ -19,7 +19,3 @@ gRPC 网关服务，负责：
 ``from antcode_gateway.auth import AuthInterceptor`` 必然 ImportError。
 请直接从子模块导入。
 """
-
-__version__ = "0.1.0"
-
-__all__ = ["__version__"]

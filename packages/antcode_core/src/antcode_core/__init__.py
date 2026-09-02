@@ -8,10 +8,7 @@ AntCode Core Package
 - domain: 领域层（模型、Schema）
 """
 
-__version__ = "0.1.0"
-
 __all__ = [
-    "__version__",
     "common",
     "application",
     "infrastructure",
