@@ -33,6 +33,9 @@ def _execution(*, lease_id: str = "lease-1", runtime_status=None):
         end_time=None,
         duration_seconds=None,
         result_data=None,
+        # 终态吸收路径要读这两列判"补录还是覆盖"；桩缺列会把断言变成 AttributeError。
+        exit_code=None,
+        error_message=None,
     )
 
 

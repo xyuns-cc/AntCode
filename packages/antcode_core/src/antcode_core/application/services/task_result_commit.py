@@ -185,12 +185,42 @@ def _result_update_decision(execution: TaskRun, request: ResultCommitRequest) ->
     if current in _RUNTIME_TERMINAL and current != effective_request.runtime_status:
         return _UpdateDecision(progress, {}, current)
     if _is_stale_runtime_transition(execution, effective_request):
-        accepted = progress or current == effective_request.runtime_status
-        return _UpdateDecision(accepted, {}, current)
+        if current in _RUNTIME_TERMINAL:
+            # 传原始 request：退出码只能挂回 Worker 自己判的那个终态，metadata 被拒时
+            # effective_request 的 FAILED 是服务端改判的，不是 Worker 报的判决。
+            return _absorb_settled_terminal(execution, request)
+        return _UpdateDecision(progress or current == effective_request.runtime_status, {}, current)
     _apply_dispatch_update(execution, effective_request, updates)
     _apply_runtime_update(execution, effective_request, updates)
     runtime_status = updates.get("runtime_status", current)
     return _UpdateDecision(True, updates, runtime_status)
+
+
+def _absorb_settled_terminal(execution: TaskRun, reported: ResultCommitRequest) -> _UpdateDecision:
+    """行已停在终态：判决归先写的一方，退出码归唯一观测得到它的 Worker。
+
+    控制面（驱逐 / 失租 / 超时）判的是推测，且那笔事务同时改了 Task 聚合计数并交付了
+    RetryIntent，单独改这一行回滚不掉下游事实，所以判决与其理由一个字节都不动。
+    ``failure_settlement`` 从不写 exit_code，这里的 NULL 是"不知道"而非"判过了"，补录它
+    不覆盖任何人的结论。丢掉的那部分只能靠日志留痕：本路径的返回值改前改后都是
+    ``accepted=True``，只认返回值就是假绿。
+    """
+    backfill = (
+        reported.runtime_status == execution.runtime_status
+        and reported.exit_code is not None
+        and execution.exit_code is None
+    )
+    logger.warning(
+        "结果晚于已写入的终态: run_id={} runtime_status={} 上报 exit_code={} 补录={} "
+        "上报 error_message={} 已存 error_message={}",
+        execution.run_id,
+        execution.runtime_status,
+        reported.exit_code,
+        backfill,
+        reported.error_message,
+        execution.error_message,
+    )
+    return _UpdateDecision(True, {"exit_code": reported.exit_code} if backfill else {}, execution.runtime_status)
 
 
 def _normalize_result_metadata(
@@ -201,14 +231,7 @@ def _normalize_result_metadata(
         return request, request.metadata_builder(execution)
     except ResultMetadataRejected as exc:
         logger.warning("结果 metadata 被拒绝: run_id={} error={}", request.run_id, exc)
-        return (
-            replace(
-                request,
-                runtime_status=RuntimeStatus.FAILED,
-                error_message=str(exc),
-            ),
-            {},
-        )
+        return replace(request, runtime_status=RuntimeStatus.FAILED, error_message=str(exc)), {}
 
 
 def _rejected_outcome(run_id: str) -> ResultCommitOutcome:
