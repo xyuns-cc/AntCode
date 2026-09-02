@@ -113,12 +113,16 @@ const createCurrentTrendData = (
   }
 }
 
+// null = 没有任何可画的读数。没有历史点时这张图退化成一个「当前」点，取的是
+// transformWorker 压出来的 cpu/memory —— 对一台从没上报过的机器那是两个凭空的 0%
+// （见 ../types.ts::hasMetrics），和「这台机器很闲」无法区分。
 export const createWorkerDetailData = (
   worker: WorkerDisplayData | null,
   history: WorkerHistoryPoint[]
 ): ChartData<'line'> | null => {
   if (!worker) return null
   const hasHistory = history.length > 0
+  if (!hasHistory && !worker.hasMetrics) return null
   const labels = hasHistory
     ? history.map((point) => {
         const date = new Date(point.timestamp)

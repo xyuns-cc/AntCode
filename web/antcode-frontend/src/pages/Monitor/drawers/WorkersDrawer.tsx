@@ -4,6 +4,7 @@ import { OsIcon } from '../StatusIcons'
 import { getOsName, getStatusColor, getStatusText } from '../status'
 import { TaskIndicators } from '../sections/WorkersSection'
 import type { WorkerDisplayData } from '../types'
+import { usageBarColor, usageReading, usageText } from '../usage'
 
 interface WorkersDrawerProps {
   open: boolean
@@ -12,12 +13,11 @@ interface WorkersDrawerProps {
   onSelect: (worker: WorkerDisplayData) => void
 }
 
-const metricColor = (value: number, normal: string) => value > 80 ? '#ff4d4f' : value > 60 ? '#faad14' : normal
-
-const DrawerMetric = ({ label, value, color }: { label: string; value: number; color: string }) => (
+// value 为 null 时条形留空且不涂色，读数位写占位符（见 ../usage）。
+const DrawerMetric = ({ label, value, color }: { label: string; value: number | null; color: string }) => (
   <div className="metric-item-drawer">
-    <div className="metric-label-drawer"><span>{label}</span><span>{Math.round(value)}%</span></div>
-    <Progress percent={Math.round(value)} strokeColor={metricColor(value, color)} showInfo={false} size="small" />
+    <div className="metric-label-drawer"><span>{label}</span><span>{usageText(value)}</span></div>
+    <Progress percent={value ?? 0} strokeColor={usageBarColor(value, color)} showInfo={false} size="small" />
   </div>
 )
 
@@ -31,8 +31,8 @@ const DrawerWorkerCard = ({ worker, onSelect }: { worker: WorkerDisplayData; onS
       <Tag color={getStatusColor(worker.status)} style={{ fontSize: 10 }}>{getStatusText(worker.status)}</Tag>
     </div>
     <div className="worker-metrics-drawer">
-      <DrawerMetric label="CPU" value={worker.cpu} color="#1890ff" />
-      <DrawerMetric label="内存" value={worker.memory} color="#52c41a" />
+      <DrawerMetric label="CPU" value={usageReading(worker, 'cpu')} color="#1890ff" />
+      <DrawerMetric label="内存" value={usageReading(worker, 'memory')} color="#52c41a" />
       <div className="metric-item-drawer">
         <div className="metric-label-drawer"><span>任务</span><span>{worker.tasks}个</span></div>
         <TaskIndicators count={worker.tasks} />

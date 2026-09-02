@@ -39,6 +39,7 @@ import { workerService } from '@/services/workers'
 import type { ClusterSpiderStats, SpiderStatsHistoryPoint, Worker } from '@/types'
 import Logger from '@/utils/logger'
 import MetricCard, { NO_METRIC } from './MetricCard'
+import { useSpiderTrendSamples } from './useSpiderTrendSamples'
 
 ChartJS.register(
   CategoryScale, LinearScale, PointElement, LineElement, BarElement,
@@ -47,6 +48,7 @@ ChartJS.register(
 
 const { Text } = Typography
 const AUTO_REFRESH_INTERVAL = 5000
+const LATENCY_SAMPLE_WINDOW = 15
 
 interface SpiderStatsTabProps {
   refreshKey?: number
@@ -62,7 +64,8 @@ const SpiderStatsTab: React.FC<SpiderStatsTabProps> = memo(({ refreshKey }) => {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [stats, setStats] = useState<ClusterSpiderStats | null>(null)
-const [workers, setWorkers] = useState<Worker[]>([])
+// null = Worker 列表这一路没取到，与「一台在线 Worker 都没有」是两回事。
+const [workers, setWorkers] = useState<Worker[] | null>(null)
 const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
   const [historyData, setHistoryData] = useState<SpiderStatsHistoryPoint[]>([])
   const [historyError, setHistoryError] = useState<string | null>(null)
@@ -72,52 +75,42 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
   const isFirstLoad = useRef(true)
 
   // 轮询趋势只保留后端提供的完成任务请求窗口和平均延迟。
-  const [realtimeTrend, setRealtimeTrend] = useState<Array<{
-    time: string
-    reqRate: number
-    latency: number
-  }>>([])
+  const trend = useSpiderTrendSamples()
+  const appendTrendSample = trend.append
 
-  // 加载数据（无感刷新：只在首次加载时显示 loading）
+  // 两路各自成败。整块 Promise.all + catch 会把「一路挂了」放大成「两路都没有」：
+  // 指标卡和 Worker 下拉同时空掉，与「集群刚起来还没数据」长得一模一样。
   const loadData = useCallback(async () => {
     // 只在首次加载时显示 loading skeleton
     if (isFirstLoad.current) {
       setLoading(true)
     }
     setRefreshing(true)
-    
-    try {
-      const [clusterStats, workerList] = await Promise.all([
-        workerService.getClusterSpiderStats(),
-        workerService.getAllWorkers()
-      ])
-      setStats(clusterStats)
-      setWorkers(workerList.filter((worker) => worker.status === 'online'))
-      setLastUpdate(new Date())
 
-      // 更新轮询趋势（追加新数据点）
-      const now = new Date()
-      const timeStr = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      setRealtimeTrend(prev => {
-        const reqRate = clusterStats?.clusterRequestsPerMinute || 0
-        const latency = clusterStats?.avgLatencyMs || 0
-        const newData = [...prev, {
-          time: timeStr,
-          reqRate,
-          latency
-        }]
-        return newData.slice(-20) // 保留最近 20 个数据点
-      })
-    } catch (e) {
-      Logger.error('Failed to load spider stats:', e)
-    } finally {
-      if (isFirstLoad.current) {
-        isFirstLoad.current = false
-        setLoading(false)
-      }
-      setRefreshing(false)
+    const [statsResult, workersResult] = await Promise.allSettled([
+      workerService.getClusterSpiderStats(),
+      workerService.getAllWorkers()
+    ])
+    if (statsResult.status === 'rejected') Logger.error('加载集群爬虫统计失败:', statsResult.reason)
+    if (workersResult.status === 'rejected') Logger.error('加载 Worker 列表失败:', workersResult.reason)
+
+    setStats(statsResult.status === 'fulfilled' ? statsResult.value : null)
+    setWorkers(workersResult.status === 'fulfilled'
+      ? workersResult.value.filter((worker) => worker.status === 'online')
+      : null)
+    if (statsResult.status === 'fulfilled') {
+      // 拉取失败时既不推进「更新于」，也不补采样点：补一个 0 会在趋势图上画出一次
+      // 并不存在的跌零，推进时间戳则是拿失败冒充一次成功读数。
+      setLastUpdate(new Date())
+      appendTrendSample(statsResult.value)
     }
-  }, [])
+
+    if (isFirstLoad.current) {
+      isFirstLoad.current = false
+      setLoading(false)
+    }
+    setRefreshing(false)
+  }, [appendTrendSample])
 
   const handleManualRefresh = useCallback(() => loadData(), [loadData])
 
@@ -184,24 +177,25 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
   }, [stats?.statusCodes])
 
   // 实时流量趋势图
+  const samples = trend.samples
   const trafficTrendData = useMemo(() => {
-    if (realtimeTrend.length === 0) return null
+    if (samples.length === 0) return null
     return {
-      labels: realtimeTrend.map(p => p.time),
+      labels: samples.map(p => p.time),
       datasets: [
-        { label: '最近完成请求量', data: realtimeTrend.map(p => p.reqRate), borderColor: '#667eea', backgroundColor: 'rgba(102, 126, 234, 0.15)', fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 5, borderWidth: 2 },
+        { label: '最近完成请求量', data: samples.map(p => p.reqRate), borderColor: '#667eea', backgroundColor: 'rgba(102, 126, 234, 0.15)', fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 5, borderWidth: 2 },
       ]
     }
-  }, [realtimeTrend])
+  }, [samples])
 
   // 延迟趋势图
   const latencyTrendData = useMemo(() => {
-    if (realtimeTrend.length === 0) return null
+    if (samples.length === 0) return null
     return {
-      labels: realtimeTrend.slice(-15).map(p => p.time),
-      datasets: [{ label: '延迟 (ms)', data: realtimeTrend.slice(-15).map(p => p.latency), backgroundColor: '#faad14', borderRadius: 4 }]
+      labels: samples.slice(-LATENCY_SAMPLE_WINDOW).map(p => p.time),
+      datasets: [{ label: '延迟 (ms)', data: samples.slice(-LATENCY_SAMPLE_WINDOW).map(p => p.latency), backgroundColor: '#faad14', borderRadius: 4 }]
     }
-  }, [realtimeTrend])
+  }, [samples])
 
   // 图表配置
   const areaChartOptions = {
@@ -306,8 +300,9 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
           <Card title={<Flex align="center" gap={6}><CloudServerOutlined style={{ color: token.colorPrimary }} /><span style={{ fontSize: 14 }}>全局统计详情</span></Flex>} style={{ borderRadius: 12, height: '100%' }} styles={{ body: { padding: '12px 16px' } }}>
             <div style={{ display: 'flex', flexDirection: 'column' }}>
               {[
-                { icon: <UploadOutlined />, label: '请求总数', value: formatNumber(stats?.totalRequests || 0) },
-                { icon: <DownloadOutlined />, label: '响应总数', value: formatNumber(stats?.totalResponses || 0) },
+                // 这一轮没取到统计就写占位符：'0' 和「真的一条请求都没发过」无法区分。
+                { icon: <UploadOutlined />, label: '请求总数', value: stats ? formatNumber(stats.totalRequests) : NO_METRIC },
+                { icon: <DownloadOutlined />, label: '响应总数', value: stats ? formatNumber(stats.totalResponses) : NO_METRIC },
                 // P1-round6 5.4: 移除合成运维数据 (响应*7200 假下行流量 /
                 // 硬编码 DupeFilter=12,403 / 错误*0.5 假 Dropped)。真实无来源
                 // 的字段改为 "—"; 后端后续如提供 total_bytes / dupe_filter /
@@ -341,7 +336,7 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
       </Card>
 
       {/* Worker历史趋势 */}
-      <Card title={<Flex align="center" gap={6}><LineChartOutlined style={{ color: token.colorPrimary }} /><span style={{ fontSize: 14 }}>Worker 历史趋势</span></Flex>} extra={<Space><Select placeholder="选择 Worker" style={{ width: 140 }} allowClear value={selectedWorkerId} onChange={setSelectedWorkerId} size="small" options={workers.map(worker => ({ label: worker.name, value: worker.id }))} /><Select value={historyHours} onChange={setHistoryHours} style={{ width: 80 }} size="small" options={[{ label: '1小时', value: 1 }, { label: '6小时', value: 6 }, { label: '24小时', value: 24 }]} /></Space>} style={{ borderRadius: 12 }} styles={{ body: { padding: '12px 16px' } }}>
+      <Card title={<Flex align="center" gap={6}><LineChartOutlined style={{ color: token.colorPrimary }} /><span style={{ fontSize: 14 }}>Worker 历史趋势</span></Flex>} extra={<Space><Select placeholder={workers === null ? 'Worker 列表未取到' : '选择 Worker'} disabled={workers === null} style={{ width: 140 }} allowClear value={selectedWorkerId} onChange={setSelectedWorkerId} size="small" options={(workers ?? []).map(worker => ({ label: worker.name, value: worker.id }))} /><Select value={historyHours} onChange={setHistoryHours} style={{ width: 80 }} size="small" options={[{ label: '1小时', value: 1 }, { label: '6小时', value: 6 }, { label: '24小时', value: 24 }]} /></Space>} style={{ borderRadius: 12 }} styles={{ body: { padding: '12px 16px' } }}>
         <div style={{ height: 220 }}>
           {historyError ? (
             <Alert type="error" showIcon message="历史指标加载失败" description={historyError} />

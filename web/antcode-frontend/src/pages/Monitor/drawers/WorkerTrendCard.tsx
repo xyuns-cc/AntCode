@@ -1,4 +1,4 @@
-import { Button, Card, theme } from 'antd'
+import { Button, Card, Empty, theme } from 'antd'
 import type { Chart, ChartData, ChartOptions } from 'chart.js'
 import type { RefObject } from 'react'
 import { Line } from 'react-chartjs-2'
@@ -26,8 +26,12 @@ export const WorkerTrendCard = ({ chartRef, data, options }: WorkerTrendCardProp
       size="small"
       extra={<span style={{ fontSize: 11, color: token.colorTextTertiary }}>💡 滚轮缩放 · 拖拽平移</span>}
     >
+      {/* data 为 null = 这台机器既没有历史点也没上报过当前读数（见 ../charts/data）。
+          留一张空白画布会被读成「用量一直是 0」或「图还没加载出来」。 */}
       <div style={{ height: 250 }}>
-        {data && <Line ref={chartRef} data={data} options={options} />}
+        {data
+          ? <Line ref={chartRef} data={data} options={options} />
+          : <Empty description="该 Worker 尚未上报过资源指标" />}
       </div>
     </Card>
   )

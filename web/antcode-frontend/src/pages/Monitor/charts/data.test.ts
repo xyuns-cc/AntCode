@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { calculateClusterMetrics, createDiskUsageData, createTaskStatsData, createTrendData } from './data'
+import {
+  calculateClusterMetrics,
+  createDiskUsageData,
+  createTaskStatsData,
+  createTrendData,
+  createWorkerDetailData,
+} from './data'
 import { transformWorker } from '../data'
 import type { ClusterHistory, WorkerDisplayData } from '../types'
 import type { Worker, WorkerMetrics } from '@/types'
@@ -154,6 +160,32 @@ describe('磁盘图的过滤依据来自 transformWorker 的映射结果', () =>
 
     expect(chart.labels).toEqual(['node-a'])
     expect(chart.datasets[0].data).toEqual([0])
+  })
+})
+
+/**
+ * 没有历史点时这张图退化成一个「当前」点，取的是 transformWorker 压出来的 cpu/memory ——
+ * 对一台从没上报过的机器那是两个凭空的 0%。历史点是后端真数据，与 hasMetrics 无关，
+ * 有历史就必须照常画（反向的过度收紧同样是缺陷）。
+ */
+describe('createWorkerDetailData 不为没上报过的机器编一个「当前 0%」', () => {
+  it('上报过读数、没有历史时照常画那一个当前点', () => {
+    const chart = createWorkerDetailData(displayWorker({ hasMetrics: true, cpu: 0, memory: 7 }), [])
+
+    expect(chart?.labels).toEqual(['当前'])
+    expect(chart?.datasets.map((dataset) => dataset.data)).toEqual([[0], [7]])
+  })
+
+  it('从没上报过、也没有历史时不出图', () => {
+    expect(createWorkerDetailData(displayWorker({ hasMetrics: false }), [])).toBeNull()
+  })
+
+  it('从没上报过但后端给了历史点时照常画历史', () => {
+    const chart = createWorkerDetailData(displayWorker({ hasMetrics: false }), [
+      { timestamp: '2026-08-10T01:00:00Z', cpu: 31, memory: 42, disk: 5 },
+    ])
+
+    expect(chart?.datasets.map((dataset) => dataset.data)).toEqual([[31], [42]])
   })
 })
 

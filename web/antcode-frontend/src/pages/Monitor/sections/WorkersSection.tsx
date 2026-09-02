@@ -3,6 +3,7 @@ import { Button, Card, Progress, Tag, theme } from 'antd'
 import { OsIcon } from '../StatusIcons'
 import { getOsName, getStatusColor, getStatusText } from '../status'
 import type { WorkerDisplayData } from '../types'
+import { usageBarColor, usageReading, usageText } from '../usage'
 
 interface WorkersSectionProps {
   workers: WorkerDisplayData[]
@@ -11,8 +12,6 @@ interface WorkersSectionProps {
   onShowAll: () => void
   onSelect: (worker: WorkerDisplayData) => void
 }
-
-const metricColor = (value: number, normal: string) => value > 80 ? '#ff4d4f' : value > 60 ? '#faad14' : normal
 
 const WorkerCard = ({ worker, onSelect }: { worker: WorkerDisplayData; onSelect: () => void }) => (
   <Card className={`worker-card-compact worker-${worker.status}`} hoverable onClick={onSelect}>
@@ -24,8 +23,8 @@ const WorkerCard = ({ worker, onSelect }: { worker: WorkerDisplayData; onSelect:
       <Tag color={getStatusColor(worker.status)} style={{ fontSize: 10 }}>{getStatusText(worker.status)}</Tag>
     </div>
     <div className="worker-metrics-compact">
-      <MetricRow label="CPU" value={worker.cpu} color="#1890ff" />
-      <MetricRow label="内存" value={worker.memory} color="#52c41a" />
+      <MetricRow label="CPU" value={usageReading(worker, 'cpu')} color="#1890ff" />
+      <MetricRow label="内存" value={usageReading(worker, 'memory')} color="#52c41a" />
       <div className="metric-item-compact">
         <div className="metric-label-compact"><span>任务</span><span>{worker.tasks}个</span></div>
         <TaskIndicators count={worker.tasks} mini />
@@ -34,12 +33,13 @@ const WorkerCard = ({ worker, onSelect }: { worker: WorkerDisplayData; onSelect:
   </Card>
 )
 
-const MetricRow = ({ label, value, color }: { label: string; value: number; color: string }) => (
+// value 为 null 时条形留空且不涂色，读数位写占位符（见 ../usage）。
+const MetricRow = ({ label, value, color }: { label: string; value: number | null; color: string }) => (
   <div className="metric-row">
     <span className="metric-label-compact">{label}</span>
     <div className="metric-value-compact">
-      <Progress percent={Math.round(value)} strokeColor={metricColor(value, color)} showInfo={false} size="small" style={{ width: '100%' }} />
-      <span className="metric-percent">{Math.round(value)}%</span>
+      <Progress percent={value ?? 0} strokeColor={usageBarColor(value, color)} showInfo={false} size="small" style={{ width: '100%' }} />
+      <span className="metric-percent">{usageText(value)}</span>
     </div>
   </div>
 )

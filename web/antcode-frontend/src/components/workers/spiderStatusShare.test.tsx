@@ -11,6 +11,7 @@
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import type { ClusterSpiderStats } from '@/types'
 import SpiderStatsTab from './SpiderStatsTab'
 
 const mocks = vi.hoisted(() => ({
@@ -41,8 +42,23 @@ const share = async (label: string): Promise<string> => {
   return (row.textContent ?? '').replace(label, '').trim()
 }
 
+// 喂整份 ClusterSpiderStats。残缺 fixture 之前被调用点的 `|| 0` 兜住了：改成如实区分
+// 「没取到」之后，缺字段会当场崩，说明这个 mock 一直在冒充一份后端不会返回的回包。
+const clusterStats = (overrides: Partial<ClusterSpiderStats>): ClusterSpiderStats => ({
+  totalRequests: 0,
+  totalResponses: 0,
+  totalItemsScraped: 0,
+  totalErrors: 0,
+  avgLatencyMs: 0,
+  domainStats: [],
+  clusterRequestsPerMinute: 0,
+  workerCount: 1,
+  statusCodes: {},
+  ...overrides,
+})
+
 const renderTab = (statusCodes: Record<string, number>) => {
-  mocks.getClusterSpiderStats.mockResolvedValue({ statusCodes, workerCount: 1 })
+  mocks.getClusterSpiderStats.mockResolvedValue(clusterStats({ statusCodes }))
   mocks.getAllWorkers.mockResolvedValue([])
   return render(<SpiderStatsTab />)
 }
@@ -57,11 +73,10 @@ describe('状态码分布卡的 2xx / 4xx-5xx 占比', () => {
 
   it('分母是响应数而不是请求数', async () => {
     // 2 个 200 + 2 个 404 → 50.0%。若分母换成 totalRequests(=8) 就会算成 25.0%。
-    mocks.getClusterSpiderStats.mockResolvedValue({
+    mocks.getClusterSpiderStats.mockResolvedValue(clusterStats({
       statusCodes: { '200': 2, '404': 2 },
       totalRequests: 8,
-      workerCount: 1,
-    })
+    }))
     mocks.getAllWorkers.mockResolvedValue([])
     render(<SpiderStatsTab />)
 
