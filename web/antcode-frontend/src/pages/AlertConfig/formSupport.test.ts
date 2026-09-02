@@ -2,8 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('@/utils/notification', () => ({ default: vi.fn() }))
 
+import type { WebhookConfig } from '@/services/alert'
 import showNotification from '@/utils/notification'
-import { SECRET_MASK, validateWebhookUrl, notifyActionFailure } from './formSupport'
+import { SECRET_MASK, buildWebhookPayload, validateWebhookUrl, notifyActionFailure } from './formSupport'
 
 const notify = vi.mocked(showNotification)
 
@@ -42,6 +43,48 @@ describe('validateWebhookUrl', () => {
 
   it('仍然拒绝非 http/https 协议（对齐后端 ALLOWED_WEBHOOK_SCHEMES）', async () => {
     await expect(validateWebhookUrl(null, 'file:///etc/passwd')).rejects.toThrow('请输入有效的 URL')
+  })
+})
+
+describe('buildWebhookPayload', () => {
+  /** 后端回显给前端的既有条目：URL 是掩码，id 是服务端签发的稳定标识。 */
+  const editedWebhook: WebhookConfig = {
+    id: 'a1b2c3d4e5f6708192a3b4c5d6e7f809',
+    name: 'ops',
+    url: SECRET_MASK,
+    levels: ['ERROR'],
+    enabled: true
+  }
+
+  // 判据：改名后提交掩码，后端要靠 id 找回这一条自己的 URL。丢了 id 就是 422。
+  it('改名时仍原样回传被编辑条目的 id', () => {
+    const payload = buildWebhookPayload(
+      { name: 'ops-renamed', url: SECRET_MASK, levels: ['ERROR'], enabled: true },
+      editedWebhook
+    )
+
+    expect(payload.id).toBe(editedWebhook.id)
+    expect(payload.name).toBe('ops-renamed')
+    expect(payload.url).toBe(SECRET_MASK)
+  })
+
+  // 判据（反面）：新建条目不得捎带任何已有条目的 id，否则会认领到别人的 URL。
+  it('新建时不带 id，且序列化后不出现 id 字段', () => {
+    const payload = buildWebhookPayload({
+      name: 'new',
+      url: 'https://open.feishu.cn/open-apis/bot/v2/hook/new',
+      levels: ['ERROR'],
+      enabled: true
+    })
+
+    expect(payload.id).toBeUndefined()
+    expect(JSON.parse(JSON.stringify(payload))).not.toHaveProperty('id')
+  })
+
+  it('未提交 enabled 时默认启用', () => {
+    const payload = buildWebhookPayload({ name: 'ops', url: SECRET_MASK, levels: ['ERROR'] }, editedWebhook)
+
+    expect(payload.enabled).toBe(true)
   })
 })
 

@@ -49,7 +49,7 @@ import type {
   EmailRecipient
 } from '@/services/alert'
 import showNotification from '@/utils/notification'
-import { notifyActionFailure, validateWebhookUrl } from './formSupport'
+import { buildWebhookPayload, notifyActionFailure, validateWebhookUrl } from './formSupport'
 import styles from './AlertConfig.module.css'
 
 const { Option } = Select
@@ -201,12 +201,7 @@ const AlertConfig: React.FC = memo(() => {
 
     try {
       const values = await webhookForm.validateFields()
-      const webhookData: WebhookConfig = {
-        name: values.name,
-        url: values.url,
-        levels: values.levels,
-        enabled: values.enabled ?? true
-      }
+      const webhookData = buildWebhookPayload(values, editingWebhook.data)
 
       // 更新配置
       const newConfig = { ...config! }

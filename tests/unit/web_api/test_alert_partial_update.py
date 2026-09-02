@@ -7,10 +7,12 @@ from antcode_core.domain.schemas.alert import AlertConfigRequest, AlertTestReque
 from antcode_web_api.routes.v1 import alert
 from fastapi import HTTPException
 
+FEISHU_ID = "a1b2c3d4e5f6708192a3b4c5d6e7f809"
+
 
 def _stored_config() -> dict:
     return {
-        "feishu_webhooks": [{"name": "main", "url": "https://example.com/hook"}],
+        "feishu_webhooks": [{"id": FEISHU_ID, "name": "main", "url": "https://example.com/hook"}],
         "dingtalk_webhooks": [{"name": "ding", "url": "https://example.com/ding"}],
         "wecom_webhooks": [],
         "email_config": {
@@ -57,6 +59,7 @@ async def test_channel_partial_update_does_not_clear_omitted_channels(monkeypatc
         channels={
             "feishu_webhooks": [
                 {
+                    "id": FEISHU_ID,
                     "name": "main",
                     "url": alert._SECRET_MASK,
                     "levels": ["ERROR"],
@@ -73,6 +76,7 @@ async def test_channel_partial_update_does_not_clear_omitted_channels(monkeypatc
     stored = from_json(save.await_args.kwargs["value"])
     assert stored == [
         {
+            "id": FEISHU_ID,
             "name": "main",
             "url": "https://example.com/hook",
             "levels": ["ERROR"],

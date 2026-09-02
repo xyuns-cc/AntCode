@@ -1,13 +1,22 @@
 """告警配置 Schema"""
 
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+def _new_webhook_id() -> str:
+    return uuid4().hex
 
 
 class WebhookConfig(BaseModel):
     """Webhook 配置"""
 
+    # 身份必须和 name 解耦：URL 是密钥、回显成掩码，写回时靠这个键认领已存的原值。
+    # 用可编辑的 name 当键，改名会认领不到（判成缺少 URL），两条互换名字则会把
+    # 各自的 URL 绑到对方身上。未提交 id 的条目按新建处理，由服务端签发。
+    id: str = Field(default_factory=_new_webhook_id, description="稳定标识")
     name: str = Field(..., description="Webhook 名称")
     url: str = Field(..., description="Webhook URL")
     levels: list[str] = Field(default_factory=lambda: ["ERROR", "CRITICAL"], description="告警级别")

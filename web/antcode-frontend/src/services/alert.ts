@@ -5,6 +5,11 @@ import { BaseService } from './base'
 
 // Webhook 配置
 export interface WebhookConfig {
+  /**
+   * 服务端签发的稳定标识。后端按它（而非可改的 name）认领已存的 URL 密钥，
+   * 所以编辑既有 Webhook 时必须原样回传；新建时留空由服务端签发。
+   */
+  id?: string
   name: string
   url: string
   levels: string[]

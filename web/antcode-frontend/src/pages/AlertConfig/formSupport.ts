@@ -1,3 +1,4 @@
+import type { WebhookConfig } from '@/services/alert'
 import { getErrorMessage } from '@/utils/helpers'
 import showNotification from '@/utils/notification'
 
@@ -30,6 +31,27 @@ export const validateWebhookUrl = async (_rule: unknown, value: unknown): Promis
   if (isHttpUrl(value)) return
   throw new Error('请输入有效的 URL')
 }
+
+type WebhookFormValues = Omit<WebhookConfig, 'id' | 'enabled'> & { enabled?: boolean }
+
+/**
+ * 组装提交给后端的 Webhook 条目。
+ *
+ * `id` 必须来自被编辑的原条目而不是表单：URL 回显成 `SECRET_MASK`，后端靠 `id`
+ * 认领它原来的值。丢了 `id` 就等同于新建一条，提交掩码会被判成缺少 URL；而按
+ * `name` 认领则会在改名时失败、在两条互换名字时把密钥绑到对方身上。
+ * 新建时留空（`undefined` 不会被 `JSON.stringify` 序列化），由服务端签发。
+ */
+export const buildWebhookPayload = (
+  values: WebhookFormValues,
+  edited?: WebhookConfig
+): WebhookConfig => ({
+  id: edited?.id,
+  name: values.name,
+  url: values.url,
+  levels: values.levels,
+  enabled: values.enabled ?? true,
+})
 
 type AntdFormValidationError = { errorFields?: unknown }
 

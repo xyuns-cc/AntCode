@@ -36,22 +36,32 @@ def mask_webhooks(webhooks: list[dict]) -> list[dict]:
 
 
 def merge_webhooks(incoming: list[WebhookConfig], existing: list[dict]) -> list[dict]:
-    existing_by_name = {item.get("name"): item for item in existing}
-    merged: list[dict] = []
-    for webhook in incoming:
-        item = webhook.model_dump()
-        if item["url"] == SECRET_MASK:
-            old_url = existing_by_name.get(item["name"], {}).get("url")
-            if not old_url:
-                raise HTTPException(status_code=422, detail=f"Webhook {item['name']} 缺少 URL")
-            item["url"] = old_url
-        else:
-            try:
-                item["url"] = validate_webhook_url(item["url"])
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=f"Webhook {item['name']} URL 不合法: {exc}") from exc
-        merged.append(item)
-    return merged
+    """按 WebhookConfig.id 认领已存 URL；name 只是展示字段，用它当键会改名即丢密钥。"""
+    _reject_duplicate_ids([webhook.id for webhook in incoming])
+    existing_by_id = {item["id"]: item for item in existing if item.get("id")}
+    return [_merged_webhook(webhook.model_dump(), existing_by_id) for webhook in incoming]
+
+
+def _reject_duplicate_ids(ids: list[str]) -> None:
+    """重复 id 会让两条 Webhook 认领同一份 URL，下一轮回显后彼此再也分不开。"""
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=422, detail="Webhook 标识重复")
+
+
+def _merged_webhook(item: dict, existing_by_id: dict[str, dict]) -> dict:
+    if item["url"] != SECRET_MASK:
+        return {**item, "url": _validated_webhook_url(item)}
+    old_url = existing_by_id.get(item["id"], {}).get("url")
+    if not old_url:
+        raise HTTPException(status_code=422, detail=f"Webhook {item['name']} 缺少 URL")
+    return {**item, "url": old_url}
+
+
+def _validated_webhook_url(item: dict) -> str:
+    try:
+        return validate_webhook_url(item["url"])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Webhook {item['name']} URL 不合法: {exc}") from exc
 
 
 def masked_email(config: dict) -> EmailConfig:
