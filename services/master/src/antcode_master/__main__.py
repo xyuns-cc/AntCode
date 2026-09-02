@@ -116,7 +116,7 @@ async def start_master() -> None:
     #    - hot pool：通过 get_redis_client() 触发单例初始化，默认 50 连接，
     #      之后所有 StreamClient() 默认构造都会复用它（数据面）。
     #    - cold pool：显式创建一个独立的低连接数客户端，预留给控制面使用。
-    logger.info("[0/6] 预热 Redis 连接池 (hot + cold)")
+    logger.info("[1/4] 预热 Redis 连接池 (hot + cold)")
     try:
         await get_redis_client()
         _cold_redis_client = make_cold_client()
@@ -129,14 +129,14 @@ async def start_master() -> None:
     await _sync_worker_acls()
 
     # 2. 尝试成为 Leader
-    logger.info("[1/6] 尝试成为 Leader")
+    logger.info("[2/4] 尝试成为 Leader")
     if await leader_election.try_become_leader():
         logger.info(f"已成为 Leader, token={leader_election.fencing_token}")
     else:
         logger.info("未成为 Leader，将在后台持续尝试")
 
     # 3. 恢复中断任务（控制面初始化前的一次性动作）
-    logger.info("[2/6] 恢复中断任务")
+    logger.info("[3/4] 恢复中断任务")
     # P1-FN-13: 启动恢复失败改 fatal（判死已保守跳过；其他非预期错直接 raise 让 orchestration 重启）。
     from antcode_master.task_persistence import task_recovery_service
 
@@ -170,7 +170,7 @@ async def start_master() -> None:
         logger.warning(f"system_config 订阅启动失败（非致命）: {e}")
 
     # 4. 并行启动 control / ingester 两组 loop
-    logger.info("[3/6] 并行启动 control + ingester loop 组")
+    logger.info("[4/4] 并行启动 control + ingester loop 组")
     results = await asyncio.gather(
         _start_control_group(),
         _start_ingester_group(),
