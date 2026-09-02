@@ -11,10 +11,10 @@ services:
     extends:
       file: docker-compose.prod.middleware.yml
       service: migration
-  crawl-redis-upgrade:
+  crawl-redis-preflight:
     extends:
       file: docker-compose.prod.middleware.yml
-      service: crawl-redis-upgrade
+      service: crawl-redis-preflight
   web-api:
     extends:
       file: docker-compose.prod.control.yml

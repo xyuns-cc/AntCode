@@ -4,17 +4,17 @@ import json
 
 import pytest
 
-from scripts.crawl_redis_upgrade_contract import UpgradeBlocked, UpgradeRequest
-from scripts.crawl_redis_upgrade_scan import build_report
-from scripts.migrate_crawl_redis import _required_setting, execute
-from tests.unit.scripts.crawl_redis_upgrade_fakes import UpgradeRedisFake
+from scripts.crawl_redis_preflight import _required_setting, execute
+from scripts.crawl_redis_preflight_contract import PreflightBlocked, PreflightRequest
+from scripts.crawl_redis_preflight_scan import build_report
+from tests.unit.scripts.crawl_redis_preflight_fakes import PreflightRedisFake
 
 EXPECTED_UNCONSUMED = 2
 MULTI_PAGE_STREAM_ENTRIES = 501
 
 
-def _request() -> UpgradeRequest:
-    return UpgradeRequest("tenant-a")
+def _request() -> PreflightRequest:
+    return PreflightRequest("tenant-a")
 
 
 def _envelope(version: int) -> str:
@@ -23,7 +23,7 @@ def _envelope(version: int) -> str:
 
 def test_namespace_contract_is_fail_closed() -> None:
     with pytest.raises(ValueError, match="namespace"):
-        UpgradeRequest("tenant a").validate()
+        PreflightRequest("tenant a").validate()
 
 
 def test_container_runtime_settings_are_explicit_and_fail_closed(monkeypatch) -> None:
@@ -45,7 +45,7 @@ def test_container_runtime_settings_are_explicit_and_fail_closed(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_stream_reports_group_pel_and_unconsumed_counts() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [("1-0", {"sensitive_payload_envelope": _envelope(2)})]
     redis.groups[key] = [{"name": "tenant-a-workers", "lag": EXPECTED_UNCONSUMED}]
@@ -61,7 +61,7 @@ async def test_stream_reports_group_pel_and_unconsumed_counts() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_stream_lag_cannot_be_treated_as_drained() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [("1-0", {"sensitive_payload_envelope": _envelope(2)})]
     redis.groups[key] = [{"name": "tenant-a-workers"}]
@@ -73,7 +73,7 @@ async def test_missing_stream_lag_cannot_be_treated_as_drained() -> None:
 
 @pytest.mark.asyncio
 async def test_retained_ready_entry_with_v1_envelope_blocks_even_when_group_is_drained() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [("1-0", {"sensitive_payload_envelope": _envelope(1)})]
     redis.groups[key] = [{"name": "tenant-a-workers", "lag": 0}]
@@ -88,7 +88,7 @@ async def test_retained_ready_entry_with_v1_envelope_blocks_even_when_group_is_d
 
 @pytest.mark.asyncio
 async def test_ready_envelope_scan_continues_across_all_pages() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [
         (f"{index}-0", {"sensitive_payload_envelope": _envelope(2)}) for index in range(1, MULTI_PAGE_STREAM_ENTRIES)
@@ -105,7 +105,7 @@ async def test_ready_envelope_scan_continues_across_all_pages() -> None:
 
 @pytest.mark.asyncio
 async def test_v2_ready_entry_is_allowed_after_pel_and_lag_reach_zero() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     key = "{tenant-a}:task:ready:worker-1"
     redis.streams[key] = [("1-0", {"sensitive_payload_envelope": _envelope(2)})]
     redis.groups[key] = [{"name": "tenant-a-workers", "lag": 0}]
@@ -123,7 +123,7 @@ async def test_v2_ready_entry_is_allowed_after_pel_and_lag_reach_zero() -> None:
 
 @pytest.mark.asyncio
 async def test_ready_dead_letter_companion_is_not_misclassified_as_execution_queue() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     dlq = "{tenant-a}:task:ready:worker-1:{dlq}:task:dead_letter"
     redis.streams[dlq] = [("1-0", {"reason": "failed"})]
 
@@ -135,7 +135,7 @@ async def test_ready_dead_letter_companion_is_not_misclassified_as_execution_que
 
 @pytest.mark.asyncio
 async def test_ready_main_key_wrong_type_is_a_reported_blocker() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     key = "{tenant-a}:task:ready:worker-1"
     redis.hashes[key] = {"unexpected": "value"}
 
@@ -148,7 +148,7 @@ async def test_ready_main_key_wrong_type_is_a_reported_blocker() -> None:
 
 @pytest.mark.asyncio
 async def test_plaintext_redispatch_member_is_reported_and_blocks_startup() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     key = "{tenant-a}:task:redispatch"
     redis.zsets[key] = [(json.dumps({"params": {"setting": "legacy-plaintext-value"}}), 1.0)]
 
@@ -164,7 +164,7 @@ async def test_plaintext_redispatch_member_is_reported_and_blocks_startup() -> N
 
 @pytest.mark.asyncio
 async def test_fresh_deploy_rejects_legacy_and_current_crawl_data() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     redis.hashes["rule:project-1:progress:batch-1"] = {"value": "1"}
     redis.sets["{tenant-a:crawl:project-1}:dedup"] = {"fingerprint"}
     redis.hashes["tenant-a:crawl:workers:registry"] = {"worker-1": "active"}
@@ -180,7 +180,7 @@ async def test_fresh_deploy_rejects_legacy_and_current_crawl_data() -> None:
 
 @pytest.mark.asyncio
 async def test_legacy_crawl_runtime_key_is_reported_as_legacy_data() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     key = "crawl:election:master"
     redis.explicit_types[key] = "string"
 
@@ -192,17 +192,17 @@ async def test_legacy_crawl_runtime_key_is_reported_as_legacy_data() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_redis_is_safe() -> None:
-    report = await build_report(UpgradeRedisFake(), _request())
+    report = await build_report(PreflightRedisFake(), _request())
 
     assert report.safe is True
 
 
 @pytest.mark.asyncio
 async def test_blocked_preflight_fails_closed_before_the_control_plane_starts() -> None:
-    redis = UpgradeRedisFake()
+    redis = PreflightRedisFake()
     redis.hashes["rule:project-1:progress:batch-1"] = {b"completed": b"3"}
 
-    with pytest.raises(UpgradeBlocked) as exc_info:
+    with pytest.raises(PreflightBlocked) as exc_info:
         await execute(redis, _request())
 
     assert {item.code for item in exc_info.value.report.blockers} == {"fresh_deploy_has_legacy_data"}

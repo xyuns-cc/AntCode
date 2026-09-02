@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from scripts.crawl_redis_upgrade_contract import Blocker, UpgradeReport, UpgradeRequest
-from scripts.crawl_redis_upgrade_execution import execution_inventory
+from scripts.crawl_redis_preflight_contract import Blocker, PreflightReport, PreflightRequest
+from scripts.crawl_redis_preflight_execution import execution_inventory
 
 SCAN_COUNT = 500
 
@@ -21,7 +21,7 @@ async def _scan_keys(client: Any, pattern: str) -> tuple[str, ...]:
     return tuple(sorted(keys))
 
 
-async def _fresh_deploy_blockers(client: Any, request: UpgradeRequest, legacy_keys: set[str]) -> list[Blocker]:
+async def _fresh_deploy_blockers(client: Any, request: PreflightRequest, legacy_keys: set[str]) -> list[Blocker]:
     blockers = []
     if legacy_keys:
         blockers.append(Blocker("fresh_deploy_has_legacy_data", "rule:*/crawl:*", f"keys={len(legacy_keys)}"))
@@ -35,13 +35,13 @@ async def _fresh_deploy_blockers(client: Any, request: UpgradeRequest, legacy_ke
     return blockers
 
 
-async def build_report(client: Any, request: UpgradeRequest) -> UpgradeReport:
+async def build_report(client: Any, request: PreflightRequest) -> PreflightReport:
     request.validate()
     legacy_keys = set(await _scan_keys(client, "rule:*"))
     legacy_keys.update(await _scan_keys(client, "crawl:*"))
     streams, stores, blockers = await execution_inventory(client, request.namespace)
     blockers.extend(await _fresh_deploy_blockers(client, request, legacy_keys))
-    return UpgradeReport(
+    return PreflightReport(
         request.namespace,
         tuple(sorted(legacy_keys)),
         tuple(streams),

@@ -73,7 +73,7 @@ def _validate_exact_images(environment: Path, state_dir: Path) -> None:
 def _start_control(environment: Path) -> None:
     control = control_compose(environment)
     # 只拉按 digest pin 的第三方镜像。不能用 `--ignore-buildable`：它只跳过自身声明了
-    # build 段的服务，migration / crawl-redis-upgrade 引用本地构建的 Web API 镜像却没有
+    # build 段的服务，migration / crawl-redis-preflight 引用本地构建的 Web API 镜像却没有
     # build 段，会被拿去 registry 解析并失败（真机实测 403）。
     _run([*control, "pull", *RUNTIME_SERVICES])
     middleware_timeout = str(MIDDLEWARE_START_TIMEOUT_SECONDS)

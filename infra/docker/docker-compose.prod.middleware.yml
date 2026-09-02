@@ -97,7 +97,7 @@ services:
       retries: 5
       start_period: 30s
 
-  # migration 与 crawl-redis-upgrade 跑的就是 Web API 镜像，只是入口命令不同，因此
+  # migration 与 crawl-redis-preflight 跑的就是 Web API 镜像，只是入口命令不同，因此
   # 这里**只引用**同一个 tag，不重复声明 build——同名 tag 的构建定义只保留一处（在
   # docker-compose.prod.control.yml 的 web-api 上），避免同一个 tag 被构建三次。
   # 两个后果必须记住：
@@ -140,9 +140,9 @@ services:
       redis:
         condition: service_healthy
 
-  crawl-redis-upgrade:
+  crawl-redis-preflight:
     image: antcode-web-api:${ANTCODE_IMAGE_TAG:?unique application image tag is required}
-    profiles: ["crawl-redis-upgrade"]
+    profiles: ["crawl-redis-preflight"]
     restart: "no"
     logging: *antcode-logging
     read_only: true
@@ -160,7 +160,7 @@ services:
       REDIS_NAMESPACE: ${REDIS_NAMESPACE:?REDIS_NAMESPACE is required}
     secrets:
       - redis_url
-    command: ["python", "-m", "scripts.migrate_crawl_redis"]
+    command: ["python", "-m", "scripts.crawl_redis_preflight"]
     networks:
       - antcode-control
     depends_on:

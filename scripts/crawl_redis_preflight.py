@@ -1,6 +1,6 @@
 """Offline Crawl Redis fresh-deploy preflight.
 
-Run as ``python -m scripts.migrate_crawl_redis``. Read-only，没有任何写开关：它
+Run as ``python -m scripts.crawl_redis_preflight``. Read-only，没有任何写开关：它
 证明目标 Redis 是干净的——没有旧 key、没有当前 Crawl 数据、执行队列已排空、没有
 不受支持的 envelope。任一条不成立即以非零码阻断控制面启动。
 """
@@ -16,18 +16,18 @@ from typing import cast
 
 from antcode_core.infrastructure.redis.factory import create_async_redis_client
 
-from scripts.crawl_redis_upgrade_contract import UpgradeBlocked, UpgradeReport, UpgradeRequest
-from scripts.crawl_redis_upgrade_scan import build_report
+from scripts.crawl_redis_preflight_contract import PreflightBlocked, PreflightReport, PreflightRequest
+from scripts.crawl_redis_preflight_scan import build_report
 
 
-async def execute(client, request: UpgradeRequest) -> UpgradeReport:
+async def execute(client, request: PreflightRequest) -> PreflightReport:
     report = await build_report(client, request)
     if report.blockers:
-        raise UpgradeBlocked(report)
+        raise PreflightBlocked(report)
     return report
 
 
-async def run(url: str, request: UpgradeRequest) -> UpgradeReport:
+async def run(url: str, request: PreflightRequest) -> PreflightReport:
     request.validate()
     client = create_async_redis_client(url, decode_responses=False)
     failure: BaseException | None = None
@@ -71,8 +71,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     try:
-        report = asyncio.run(run(url, UpgradeRequest(namespace)))
-    except UpgradeBlocked as exc:
+        report = asyncio.run(run(url, PreflightRequest(namespace)))
+    except PreflightBlocked as exc:
         print(json.dumps(exc.report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
         return 2
     print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))

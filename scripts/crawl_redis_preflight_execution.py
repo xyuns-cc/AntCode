@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 
 # 只取线协议常量，不碰 `common.security` 聚合包：那条链会实例化控制面 Settings()，
-# 而本脚本跑在只有 Redis 凭据的 `crawl-redis-upgrade` 容器里。
+# 而本脚本跑在只有 Redis 凭据的 `crawl-redis-preflight` 容器里。
 from antcode_core.common.task_payload_contract import ENVELOPE_FIELD, ENVELOPE_VERSION
 
-from scripts.crawl_redis_upgrade_contract import (
+from scripts.crawl_redis_preflight_contract import (
     Blocker,
     ExecutionStoreStats,
     StreamGroupStats,

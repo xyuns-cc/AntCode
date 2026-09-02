@@ -28,7 +28,7 @@ BUILT_IMAGES = {
     "frontend": "Dockerfile",
 }
 #: 跑 Web API 镜像但只引用不构建的服务。
-IMAGE_ONLY_SERVICES = ("migration", "crawl-redis-upgrade")
+IMAGE_ONLY_SERVICES = ("migration", "crawl-redis-preflight")
 #: 不构建、仍按 digest pin 的第三方镜像；部署入口只对这三个执行 pull。
 DIGEST_PINNED_SERVICES = RUNTIME_SERVICES
 CORE_SECRET_NAMES = {
@@ -196,7 +196,7 @@ def test_runtime_healthchecks_delegate_restarts_to_the_shared_wrapper() -> None:
     services = _compose()["services"]
 
     for service_name, service in services.items():
-        if service_name in {"migration", "crawl-redis-upgrade"}:
+        if service_name in {"migration", "crawl-redis-preflight"}:
             continue
         healthcheck = " ".join(service["healthcheck"]["test"])
         assert healthcheck.split()[1] == "/usr/local/bin/antcode-healthcheck", service_name
@@ -228,7 +228,7 @@ def test_deployment_builds_and_pulls_before_stopping_running_services() -> None:
     assert deploy.index("build_images") < deploy.index('"${compose[@]}" stop') < deploy.index('"${compose[@]}" up')
     assert "--wait" in deploy
     # pull 必须点名第三方服务：`--ignore-buildable` 只跳过自身有 build 段的服务，
-    # migration / crawl-redis-upgrade 会被拿去 registry 解析并 403（真机实测）。
+    # migration / crawl-redis-preflight 会被拿去 registry 解析并 403（真机实测）。
     assert f"readonly RUNTIME_SERVICES=({' '.join(DIGEST_PINNED_SERVICES)})" in deploy
     assert "verify-production-images.sh" not in deploy
 

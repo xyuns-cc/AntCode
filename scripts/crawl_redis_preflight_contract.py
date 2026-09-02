@@ -10,7 +10,7 @@ _NAMESPACE_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 
 
 @dataclass(frozen=True)
-class UpgradeRequest:
+class PreflightRequest:
     namespace: str
 
     def validate(self) -> None:
@@ -51,7 +51,7 @@ class ExecutionStoreStats:
 
 
 @dataclass(frozen=True)
-class UpgradeReport:
+class PreflightReport:
     namespace: str
     legacy_keys: tuple[str, ...]
     streams: tuple[StreamStats, ...]
@@ -68,8 +68,8 @@ class UpgradeReport:
         return value
 
 
-class UpgradeBlocked(RuntimeError):
-    def __init__(self, report: UpgradeReport) -> None:
+class PreflightBlocked(RuntimeError):
+    def __init__(self, report: PreflightReport) -> None:
         super().__init__(f"Crawl Redis preflight blocked by {len(report.blockers)} finding(s)")
         self.report = report
 
@@ -79,7 +79,7 @@ __all__ = [
     "ExecutionStoreStats",
     "StreamGroupStats",
     "StreamStats",
-    "UpgradeBlocked",
-    "UpgradeReport",
-    "UpgradeRequest",
+    "PreflightBlocked",
+    "PreflightReport",
+    "PreflightRequest",
 ]

@@ -6,7 +6,7 @@ import fnmatch
 from typing import Any
 
 
-class UpgradeRedisFake:
+class PreflightRedisFake:
     def __init__(self) -> None:
         self.hashes: dict[str, dict[Any, Any]] = {}
         self.sets: dict[str, set[Any]] = {}

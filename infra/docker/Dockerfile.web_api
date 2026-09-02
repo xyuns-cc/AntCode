@@ -89,9 +89,10 @@ COPY --chown=appuser:appgroup packages/antcode_contracts/src/antcode_contracts /
 COPY --chown=appuser:appgroup services/web_api/src/antcode_web_api /app/services/web_api/src/antcode_web_api
 COPY --chown=appuser:appgroup \
     scripts/__init__.py \
-    scripts/crawl_redis_upgrade_contract.py \
-    scripts/crawl_redis_upgrade_execution.py \
-    scripts/crawl_redis_upgrade_scan.py \
+    scripts/crawl_redis_preflight.py \
+    scripts/crawl_redis_preflight_contract.py \
+    scripts/crawl_redis_preflight_execution.py \
+    scripts/crawl_redis_preflight_scan.py \
     scripts/init_db.py \
     scripts/init_db_current_schema.py \
     scripts/init_db_environment.py \
@@ -99,7 +100,6 @@ COPY --chown=appuser:appgroup \
     scripts/init_db_schema_contracts.py \
     scripts/init_db_schema_upgrades.py \
     scripts/init_db_schema_validation.py \
-    scripts/migrate_crawl_redis.py \
     scripts/rotate_encryption_key.py \
     scripts/rotate_worker_hmac_encryption_key.py \
     /app/scripts/

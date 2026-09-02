@@ -32,8 +32,8 @@ from typing import Any, cast
 from antcode_core.infrastructure.redis.control_plane import task_ready_stream
 from antcode_core.infrastructure.redis.factory import create_async_redis_client
 
-from scripts.crawl_redis_upgrade_contract import Blocker, StreamGroupStats, StreamStats
-from scripts.crawl_redis_upgrade_execution import inspect_stream
+from scripts.crawl_redis_preflight_contract import Blocker, StreamGroupStats, StreamStats
+from scripts.crawl_redis_preflight_execution import inspect_stream
 
 EXIT_DRAINED = 0
 EXIT_RESIDUE = 1

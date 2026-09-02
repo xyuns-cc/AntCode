@@ -18,7 +18,7 @@ cleanup_env() {
 # 构建失败或某个 pin 的 digest 拉不到时，正在跑的控制面一个容器都还没被动过。
 #
 # pull 必须点名这三个服务，不能用 `--ignore-buildable`：那个开关只跳过**自身声明了
-# build 段**的服务，而 migration / crawl-redis-upgrade 跑的是 Web API 镜像却只引用
+# build 段**的服务，而 migration / crawl-redis-preflight 跑的是 Web API 镜像却只引用
 # 不构建，于是 compose 会拿 `antcode-web-api:<tag>` 去 registry 找，必然 403
 # （真机实测）。点名的另一个好处是服务改名时 compose 直接报 "no such service"。
 readonly RUNTIME_SERVICES=(postgres redis reverse-proxy)
@@ -84,8 +84,8 @@ compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 build_images
 "${compose[@]}" stop --timeout "$STOP_TIMEOUT" "${STOPPED_SERVICES[@]}"
 "${compose[@]}" up -d --wait --wait-timeout "$WAIT_TIMEOUT" postgres redis
-"${compose[@]}" run --rm --no-deps crawl-redis-upgrade \
-    python -m scripts.migrate_crawl_redis
+"${compose[@]}" run --rm --no-deps crawl-redis-preflight \
+    python -m scripts.crawl_redis_preflight
 
 "${compose[@]}" run --rm --no-deps migration
 

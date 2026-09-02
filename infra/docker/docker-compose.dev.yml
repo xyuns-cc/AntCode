@@ -108,12 +108,12 @@ services:
       - antcode-network
 
   # 显式运维工具，不随常驻服务自动启动。先停写，再用 docker compose run 调用。
-  crawl-redis-upgrade:
+  crawl-redis-preflight:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile.web_api
     image: antcode-web-api:dev
-    profiles: ["crawl-redis-upgrade"]
+    profiles: ["crawl-redis-preflight"]
     restart: "no"
     logging: *antcode-logging
     read_only: true
@@ -129,7 +129,7 @@ services:
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set and non-empty}@redis:6379/0
       REDIS_NAMESPACE: ${REDIS_NAMESPACE:?REDIS_NAMESPACE must be set and non-empty}
-    command: ["python", "-m", "scripts.migrate_crawl_redis"]
+    command: ["python", "-m", "scripts.crawl_redis_preflight"]
     depends_on:
       redis:
         condition: service_healthy
