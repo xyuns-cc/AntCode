@@ -27,6 +27,10 @@ from antcode_worker.config import (
 )
 from antcode_worker.config_display import sanitize_config_for_display
 
+# run_worker 返回后，事件循环里只剩已被 cancel 的残留任务和 executor 线程；
+# 真正的 drain 在 Application._shutdown_with_timeout 里已经做完了。
+_LOOP_TEARDOWN_TIMEOUT_SECONDS = 5.0
+
 
 def clear_screen():
     print("\033[2J\033[H", end="", flush=True)
@@ -395,11 +399,6 @@ def start_worker(
     setup_logging(level=log_level)
 
     # 初始化 Worker 配置
-    # T7-B3b (P1-6): grace_period 从 30 抬到 60 —— 长任务（爬虫翻页、
-    # code 项目跑测试）30s 常常不够 drain 完，被 _force_terminate 硬 cancel
-    # 后 master 侧看到 CANCELLED 语义错误。60s 更宽松，配合 deregister
-    # 让 master 尽快感知，整体 SLA 反而更快。
-    grace_period = 60.0
     config_kwargs: dict[str, Any] = {
         "host": host,
         "gateway_host": gateway_host,
@@ -424,7 +423,6 @@ def start_worker(
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    cancel_timeout = min(5.0, grace_period)
 
     try:
         loop.run_until_complete(run_worker(worker_config))
@@ -442,7 +440,7 @@ def start_worker(
                     loop.run_until_complete(
                         asyncio.wait_for(
                             asyncio.gather(*pending, return_exceptions=True),
-                            timeout=cancel_timeout,
+                            timeout=_LOOP_TEARDOWN_TIMEOUT_SECONDS,
                         )
                     )
                 except TimeoutError:
@@ -453,7 +451,7 @@ def start_worker(
                     loop.run_until_complete(
                         asyncio.wait_for(
                             loop.shutdown_default_executor(),
-                            timeout=cancel_timeout,
+                            timeout=_LOOP_TEARDOWN_TIMEOUT_SECONDS,
                         )
                     )
                 except TimeoutError:
