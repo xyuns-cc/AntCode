@@ -3578,12 +3578,6 @@
       "value": 433
     },
     {
-      "path": "web/antcode-frontend/src/components/ui/LogChart/index.tsx",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 328
-    },
-    {
       "path": "web/antcode-frontend/src/components/workers/SpiderStatsTab.tsx",
       "function": "-",
       "rule": "FILE_LINES",

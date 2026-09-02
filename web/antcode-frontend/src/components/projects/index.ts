@@ -1,5 +1,0 @@
-export { default as ProjectTypeSelector } from './ProjectTypeSelector'
-export { default as FileProjectForm } from './FileProjectForm'
-export { default as RuleProjectForm } from './RuleProjectForm'
-export { default as CodeProjectForm } from './CodeProjectForm'
-export { default as RuleSelector } from './RuleSelector'

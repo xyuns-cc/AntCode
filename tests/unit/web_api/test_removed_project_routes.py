@@ -90,7 +90,6 @@ def test_frontend_does_not_call_removed_project_file_routes():
         frontend / "services/projects.ts",
         frontend / "pages/Projects/index.tsx",
         frontend / "pages/Projects/ProjectDetail.tsx",
-        frontend / "components/projects/index.ts",
     ]
     source = "\n".join(path.read_text(encoding="utf-8") for path in checked_files)
 
