@@ -1,11 +1,13 @@
 """Master 端爬虫指标聚合与查询服务。"""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
 
+from antcode_core.application.services.workers.worker_resource_probe import persisted_worker_metrics
 from antcode_core.domain.models import Worker, WorkerHeartbeat, WorkerStatus
 from antcode_core.domain.schemas.worker import SpiderStatsSummary
 
@@ -69,7 +71,7 @@ class SpiderStatsService:
         worker = await Worker.filter(id=worker_id).first()
         if not worker:
             return SpiderStatsSummary()
-        spider_stats = self._extract_spider_stats(worker.metrics)
+        spider_stats = self._extract_spider_stats(persisted_worker_metrics(worker))
         return SpiderStatsSummary.from_heartbeat(spider_stats)
 
     async def get_cluster_spider_stats(self) -> dict[str, Any]:
@@ -77,7 +79,7 @@ class SpiderStatsService:
         totals = _ClusterTotals()
         domains: dict[str, _DomainAggregate] = {}
         for worker in workers:
-            spider_stats = self._extract_spider_stats(worker.metrics)
+            spider_stats = self._extract_spider_stats(persisted_worker_metrics(worker))
             if spider_stats:
                 self._accumulate_cluster(totals, domains, spider_stats)
         return self._build_cluster_response(totals, domains, len(workers))
@@ -279,7 +281,9 @@ class SpiderStatsService:
         ]
 
     @staticmethod
-    def _extract_spider_stats(metrics: dict | None) -> dict | None:
+    def _extract_spider_stats(metrics: Mapping[str, Any] | None) -> dict | None:
+        """``workers.metrics`` 侧的入参必须先过 ``persisted_worker_metrics``；心跳表那一列
+        由 ORM 的 ``JSONField`` 直接给出，与本列不共用契约。"""
         if not metrics:
             return None
         return metrics.get("spider_stats")

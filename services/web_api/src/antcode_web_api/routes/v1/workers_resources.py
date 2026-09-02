@@ -9,9 +9,12 @@ P2 拆分自 workers.py:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from antcode_core.application.services.workers import worker_service
+from antcode_core.application.services.workers.worker_resource_probe import persisted_worker_metrics
 from antcode_core.common.security.auth import TokenData, get_current_user
 from antcode_core.domain.models import User
 from antcode_core.infrastructure.redis import (
@@ -78,13 +81,13 @@ def _to_float(value: object, default: float = 0.0) -> float:
         return default
 
 
-def _capacity_value(resources: dict, metric: CapacityMetric) -> float:
+def _capacity_value(resources: Mapping[str, Any], metric: CapacityMetric) -> float:
     if resources.get(metric.byte_field) not in (None, ""):
         return round(_to_float(resources[metric.byte_field]) / metric.divisor, 1)
     return _to_float(resources.get(metric.legacy_field, 0))
 
 
-def _reported_limit(resources: dict, keys: tuple[str, ...]) -> int | None:
+def _reported_limit(resources: Mapping[str, Any], keys: tuple[str, ...]) -> int | None:
     """只认心跳上报过的正整数真值。
 
     0 表示"没有限额在生效"，与"没上报"一样都不是可展示的配额，统一如实为 None。
@@ -97,7 +100,7 @@ def _reported_limit(resources: dict, keys: tuple[str, ...]) -> int | None:
     return None
 
 
-def _effective_limits(resources: dict) -> dict[str, int | None]:
+def _effective_limits(resources: Mapping[str, Any]) -> dict[str, int | None]:
     """生效限额只有执行面知道，控制面推导不出来。
 
     Worker 的限额由它自己的 cgroup 预算算出，并在启动与 config_update 时按预算
@@ -120,7 +123,7 @@ async def get_worker_resources(worker_id: str, current_user: TokenData):
     if not worker:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker 不存在")
 
-    resources = worker.metrics if isinstance(worker.metrics, dict) else {}
+    resources = persisted_worker_metrics(worker) or {}
     limits = worker.resource_limits if isinstance(worker.resource_limits, dict) else {}
 
     return success(

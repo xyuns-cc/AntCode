@@ -88,12 +88,15 @@ def persisted_worker_metrics(worker: Any) -> Mapping[str, Any] | None:
     列坏了是**这一台**的数据问题，既不是"它很忙"也不是"我们读不到"——实时读数另有 Redis
     心跳这条独立来源，照常读得回来就照常参与派发。所以这里不抛也不静默：降级成"没有落库
     指标"，同时打一条点名的 WARNING，让"是谁写坏了这一列"查得下去。
+
+    措辞不提"改用心跳"：派发/排名之外的读者（队列状态、资源页、集群与爬虫统计）没有
+    第二个来源，对它们降级的结果就是"这台没上报过"。
     """
     raw = worker.metrics
     if raw is None or isinstance(raw, Mapping):
         return raw
     logger.warning(
-        "Worker [{}] 的 metrics 列不是 JSON 对象（实际是 {}），本轮忽略落库指标、只用心跳读数",
+        "Worker [{}] 的 metrics 列不是 JSON 对象（实际是 {}），本轮按没有落库指标处理",
         worker.name,
         type(raw).__name__,
     )

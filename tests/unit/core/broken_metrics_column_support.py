@@ -45,6 +45,7 @@ def worker(worker_id: int, name: str, metrics):
         transport_mode="direct",
         capabilities={"task_types": list(_TASK_TYPES)},
         metrics=metrics,
+        resource_limits=None,
         last_heartbeat=None,
         tags=None,
     )

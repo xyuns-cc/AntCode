@@ -5,6 +5,7 @@
 
 from datetime import UTC, datetime, timedelta
 
+from antcode_core.application.services.workers.worker_resource_probe import persisted_worker_metrics
 from antcode_core.domain.models import Worker, WorkerHeartbeat, WorkerStatus
 from antcode_core.domain.schemas.worker import WorkerAggregateStats
 
@@ -38,8 +39,10 @@ class WorkerStatsService:
         total_rpm = 0.0
 
         for worker in workers:
-            if worker.metrics:
-                metrics = worker.metrics
+            # 这一列的读取契约在 persisted_worker_metrics：坏列降级成"这台没上报过"，
+            # 只把它排除在均值分母之外，不让它把整个集群统计打成 500。
+            metrics = persisted_worker_metrics(worker)
+            if metrics:
                 total_projects += metrics.get("projectCount", 0)
                 total_tasks += metrics.get("taskCount", 0)
                 running_tasks += metrics.get("runningTasks", 0)

@@ -30,6 +30,7 @@ from antcode_core.application.services.workers.worker_dispatch_admission import 
 from antcode_core.application.services.workers.worker_dispatch_failure import failed_batch_dispatch
 from antcode_core.application.services.workers.worker_load_balancing import WorkerLoadBalancer
 from antcode_core.application.services.workers.worker_ready_stream import publish_ready_batch_to_worker
+from antcode_core.application.services.workers.worker_resource_probe import persisted_worker_metrics
 
 
 @dataclass
@@ -244,8 +245,12 @@ class WorkerTaskDispatcher:
         return {"success": False, "error": "当前架构暂不支持该操作"}
 
     async def get_queue_status(self, worker):
-        """获取节点队列状态（来自心跳指标）"""
-        metrics = worker.metrics if isinstance(worker.metrics, dict) else {}
+        """获取节点队列状态（来自心跳指标）。
+
+        坏列曾在这里被就地判成 ``{}``，一声不响地回三个 0 —— 与一台真空闲的机器逐字节
+        相同，而 ``max_concurrent_tasks=0`` 读起来还像"这台什么都跑不了"。
+        """
+        metrics = persisted_worker_metrics(worker) or {}
         return {
             "queued_tasks": metrics.get("queuedTasks") or metrics.get("queued_tasks", 0),
             "running_tasks": metrics.get("runningTasks") or metrics.get("running_tasks", 0),
