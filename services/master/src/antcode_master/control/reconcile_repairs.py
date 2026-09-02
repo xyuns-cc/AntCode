@@ -8,7 +8,7 @@ from typing import Any
 from antcode_core.application.services.scheduler.execution_status_service import (
     execution_status_service,
 )
-from antcode_core.domain.models import TaskRun
+from antcode_core.domain.models import Task, TaskRun
 from antcode_core.domain.models.enums import DispatchStatus, RuntimeStatus, TaskStatus
 from loguru import logger
 
@@ -166,13 +166,25 @@ async def repair_stale_task_status(authority_token: int) -> None:
     Task 永久停在 QUEUED/DISPATCHING/RUNNING，busy 检查阻断后续调度。
     这里按"最新 run 已终态且足够旧"把 Task 状态收敛到该 run 的终态。
     """
-    await execute_with_scheduler_authority(authority_token, _repair_stale_task_status)
+    tasks = await _load_busy_tasks()
+    if not tasks:
+        return
+    await execute_with_scheduler_authority(authority_token, _repair_stale_task_status, tasks=tasks)
 
 
-async def _repair_stale_task_status() -> None:
-    from antcode_core.domain.models.task import Task
+async def _load_busy_tasks() -> list[Any]:
+    """候选查询留在栅栏外，与本模块其余修复步骤同形。
 
-    busy_statuses = (TaskStatus.QUEUED, TaskStatus.DISPATCHING, TaskStatus.RUNNING)
+    读候选不是 scheduler 写入；收敛写是 ``status=task.status`` 的 CAS，
+    读到事务开始之间被改掉的 Task 只会 0 行不中、下一轮 reconcile 重来。
+    留在栅栏内的代价是空库每轮也要开事务并 ``SELECT FOR UPDATE`` 权威行，
+    新任期 epoch 未落库时还会抛异常、连累 reconcile 后续步骤。
+    """
+    busy_statuses = [TaskStatus.QUEUED, TaskStatus.DISPATCHING, TaskStatus.RUNNING]
+    return await Task.filter(status__in=busy_statuses).only("id", "status").all()
+
+
+async def _repair_stale_task_status(tasks: list[Any]) -> None:
     terminal = {
         TaskStatus.SUCCESS,
         TaskStatus.FAILED,
@@ -182,7 +194,6 @@ async def _repair_stale_task_status() -> None:
         TaskStatus.SKIPPED,
     }
     threshold = datetime.now(UTC) - timedelta(seconds=STALE_TASK_STATUS_AGE_SECONDS)
-    tasks = await Task.filter(status__in=list(busy_statuses)).only("id", "status").all()
     repaired = 0
     for task in tasks:
         latest = await TaskRun.filter(task_id=task.id).order_by("-id").only("id", "status", "created_at").first()
