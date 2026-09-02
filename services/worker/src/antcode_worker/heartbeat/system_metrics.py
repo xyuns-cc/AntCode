@@ -175,11 +175,6 @@ class SystemMetricsCollector(SpiderStatsCollectorMixin):
 _metrics_collector: SystemMetricsCollector | None = None
 
 
-def get_metrics_collector() -> SystemMetricsCollector | None:
-    """获取全局指标采集器"""
-    return _metrics_collector
-
-
 def init_metrics_collector(
     disk_path: str = "/",
     max_slots: int = 5,

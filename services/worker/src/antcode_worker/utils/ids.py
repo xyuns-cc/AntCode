@@ -7,12 +7,6 @@ Requirements: 13.1
 import os
 import time
 import uuid
-from threading import Lock
-
-# 序列号生成器
-_seq_lock = Lock()
-_seq_counter = 0
-_seq_timestamp = 0
 
 
 def generate_run_id(prefix: str = "run") -> str:

@@ -1487,17 +1487,11 @@
       "path": "services/worker/src/antcode_worker/heartbeat/reporter.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 520
+      "value": 484
     },
     {
       "path": "services/worker/src/antcode_worker/heartbeat/reporter.py",
       "function": "HeartbeatReporter.__init__",
-      "rule": "POSITIONAL_ARGS",
-      "value": 9
-    },
-    {
-      "path": "services/worker/src/antcode_worker/heartbeat/reporter.py",
-      "function": "init_heartbeat_reporter",
       "rule": "POSITIONAL_ARGS",
       "value": 9
     },

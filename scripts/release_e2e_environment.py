@@ -53,7 +53,6 @@ DEFAULT_PORTS = MappingProxyType({"https": DEFAULT_HTTPS_PORT, "http": DEFAULT_H
 #: 宿主侧访问名。容器侧必须用 CONTAINER_HOST_ALIAS，两者不可互换（见 host_git_base_url）。
 RUNNER_HOST = "localhost"
 DEFAULT_UV_VERSION = "0.8.17"
-DEFAULT_POSTGRES_HOST_PORT = 15432
 DEFAULT_REDIS_HOST_PORT = 16379
 #: 容器侧统一用它称呼宿主；`prod.e2e-control.yml` / `prod.e2e-worker.yml` 里的
 #: `extra_hosts: host-gateway` 负责解析。宿主进程解析不了它（见 host_git_base_url）。

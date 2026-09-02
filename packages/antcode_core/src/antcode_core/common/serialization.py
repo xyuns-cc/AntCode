@@ -1,7 +1,7 @@
 """
 高性能序列化工具模块
 
-提供统一的 JSON 和 MessagePack 序列化/反序列化功能。
+提供统一的 JSON 序列化/反序列化功能。
 使用 ujson 替代标准 json 库以提升性能。
 
 Requirements: 8.1
@@ -13,14 +13,6 @@ import ujson
 from loguru import logger
 
 from antcode_core.common.exceptions import SerializationError
-
-try:
-    import msgpack
-
-    HAS_MSGPACK = True
-except ImportError:
-    msgpack = None  # type: ignore
-    HAS_MSGPACK = False
 
 
 def _default_json_serializer(obj):
@@ -109,62 +101,6 @@ class Serializer:
         except (ValueError, TypeError):
             return False, None
 
-    @staticmethod
-    def to_msgpack(obj):
-        """
-        将对象序列化为 MessagePack 二进制数据
-
-        Args:
-            obj: 待序列化的对象
-
-        Returns:
-            msgpack 二进制数据
-
-        Raises:
-            SerializationError: 序列化失败或 msgpack 未安装时抛出
-        """
-        if not HAS_MSGPACK:
-            raise SerializationError("msgpack 未安装，请运行: pip install msgpack")
-
-        try:
-            return msgpack.packb(obj, use_bin_type=True, default=Serializer._msgpack_default)
-        except (TypeError, ValueError) as e:
-            obj_type = type(obj).__name__
-            logger.error(f"MessagePack 序列化失败: 对象类型 {obj_type}, 错误: {e}")
-            raise SerializationError(f"无法序列化类型 {obj_type}: {e}") from e
-
-    @staticmethod
-    def from_msgpack(data):
-        """
-        将 MessagePack 二进制数据反序列化为对象
-
-        Args:
-            data: msgpack 二进制数据
-
-        Returns:
-            反序列化后的对象
-
-        Raises:
-            SerializationError: 反序列化失败或 msgpack 未安装时抛出
-        """
-        if not HAS_MSGPACK:
-            raise SerializationError("msgpack 未安装，请运行: pip install msgpack")
-
-        try:
-            return msgpack.unpackb(data, raw=False)
-        except (ValueError, TypeError, msgpack.UnpackException) as e:
-            logger.error(f"MessagePack 反序列化失败: {e}")
-            raise SerializationError(f"无法反序列化 MessagePack: {e}") from e
-
-    @staticmethod
-    def _msgpack_default(obj):
-        """msgpack 默认序列化处理器"""
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        if hasattr(obj, "__dict__"):
-            return obj.__dict__
-        raise TypeError(f"不支持的类型: {type(obj).__name__}")
-
 
 # 便捷的模块级函数
 def to_json(obj, ensure_ascii=False, sort_keys=False, indent=0, default=None):
@@ -180,16 +116,6 @@ def from_json(data):
 def try_from_json(data):
     """便捷的 JSON 探测函数，返回 (是否命中, 反序列化结果)"""
     return Serializer.try_from_json(data)
-
-
-def to_msgpack(obj):
-    """便捷的 MessagePack 序列化函数"""
-    return Serializer.to_msgpack(obj)
-
-
-def from_msgpack(data):
-    """便捷的 MessagePack 反序列化函数"""
-    return Serializer.from_msgpack(data)
 
 
 def json_dump_file(obj, file_path, ensure_ascii=False, indent=2):

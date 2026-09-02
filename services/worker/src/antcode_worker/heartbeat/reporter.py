@@ -465,10 +465,6 @@ class HeartbeatReporter:
         return detector.detect_all()
 
 
-# 全局实例
-_heartbeat_reporter: HeartbeatReporter | None = None
-
-
 async def _stop_reporter_tasks(
     tasks: tuple[tuple[str, asyncio.Task | None], ...],
 ) -> list[Exception]:
@@ -486,35 +482,3 @@ async def _stop_reporter_tasks(
             logger.opt(exception=exc).error("{} task 停止失败", label)
             failures.append(exc)
     return failures
-
-
-def get_heartbeat_reporter() -> HeartbeatReporter | None:
-    """获取全局心跳上报器"""
-    return _heartbeat_reporter
-
-
-def init_heartbeat_reporter(
-    transport: TransportProtocol,
-    worker_id: str,
-    metrics_collector: MetricsCollectorProtocol | None = None,
-    version: str = "",
-    max_concurrent_tasks: int = 5,
-    name: str = "",
-    host: str = "",
-    port: int = 0,
-    region: str = "",
-) -> HeartbeatReporter:
-    """初始化全局心跳上报器"""
-    global _heartbeat_reporter
-    _heartbeat_reporter = HeartbeatReporter(
-        transport=transport,
-        worker_id=worker_id,
-        metrics_collector=metrics_collector,
-        version=version,
-        max_concurrent_tasks=max_concurrent_tasks,
-        name=name,
-        host=host,
-        port=port,
-        region=region,
-    )
-    return _heartbeat_reporter

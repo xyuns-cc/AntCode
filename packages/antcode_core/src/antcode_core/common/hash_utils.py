@@ -11,9 +11,6 @@ from typing import Literal
 
 HashAlgorithm = Literal["md5", "sha256"]
 
-# 默认读取块大小（8KB）
-DEFAULT_CHUNK_SIZE = 8192
-
 
 def calculate_content_hash(
     content: bytes | str,
