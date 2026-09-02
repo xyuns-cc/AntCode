@@ -131,8 +131,6 @@ class Settings(BaseSettings):
     # === 加密密钥（独立于 JWT Secret）===
     ENCRYPTION_KEY: str = Field(default="", repr=False)
     ENCRYPTION_KEY_SALT: str = Field(default="", repr=False)
-    # 显式迁移旧 PBKDF2 密文；完成 rotate 后清空。
-    ENCRYPTION_LEGACY_KDF_SALT: str = Field(default="", repr=False)
     # T7-P2-5: 密钥轮换。逗号分隔的旧密钥（Fernet 派生前的原文），仅用于解
     # 密老密文。加密永远用当前 ENCRYPTION_KEY。轮换后一段时间可清空。
     ENCRYPTION_KEYS_LEGACY: str = Field(default="", repr=False)

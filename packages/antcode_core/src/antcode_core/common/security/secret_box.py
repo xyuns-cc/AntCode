@@ -37,7 +37,7 @@ class SecretBox:
     def __init__(self) -> None:
         self._cached: MultiFernet | None = None
         # 缓存 key 也要包含 salt 变化,避免 env 改 salt 后仍返回旧实例
-        self._cache_key: tuple[str, str, str, str] | None = None
+        self._cache_key: tuple[str, str, str] | None = None
 
     def encrypt(self, plaintext: str) -> str:
         return self._multi().encrypt(plaintext.encode("utf-8")).decode("utf-8")
@@ -100,9 +100,8 @@ class SecretBox:
         primary = (settings.ENCRYPTION_KEY or "").strip()
         legacy = (getattr(settings, "ENCRYPTION_KEYS_LEGACY", "") or "").strip()
         salt = (getattr(settings, "ENCRYPTION_KEY_SALT", "") or "").strip()
-        legacy_kdf_salt = (getattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "") or "").strip()
         # 缓存命中（primary/legacy/salt 三者未变）
-        cache_key = (primary, legacy, salt, legacy_kdf_salt)
+        cache_key = (primary, legacy, salt)
         if self._cached is not None and self._cache_key == cache_key:
             return self._cached
 
@@ -110,8 +109,6 @@ class SecretBox:
             raise RuntimeError("ENCRYPTION_KEY 未配置。请设置至少 32 字节的高熵密钥")
 
         fernets: list[Fernet] = [self._primary()]
-        if legacy_kdf_salt and legacy_kdf_salt != salt:
-            fernets.append(Fernet(self._derive_fernet_key(primary, legacy_kdf_salt)))
         if legacy:
             seen: set[str] = {primary}
             for k in legacy.split(","):
@@ -120,8 +117,6 @@ class SecretBox:
                     continue
                 seen.add(k)
                 fernets.append(Fernet(self._derive_fernet_key(k, salt)))
-                if legacy_kdf_salt and legacy_kdf_salt != salt:
-                    fernets.append(Fernet(self._derive_fernet_key(k, legacy_kdf_salt)))
         self._cached = MultiFernet(fernets)
         self._cache_key = cache_key
         return self._cached

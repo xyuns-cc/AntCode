@@ -80,7 +80,6 @@ def _encryption_settings(monkeypatch):
     monkeypatch.setattr(settings, "ENCRYPTION_KEY", "redispatch-control-key-material-00000001")
     monkeypatch.setattr(settings, "ENCRYPTION_KEY_SALT", "redispatch-test-salt")
     monkeypatch.setattr(settings, "ENCRYPTION_KEYS_LEGACY", "")
-    monkeypatch.setattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "")
     secret_box._cached = None
     secret_box._cache_key = None
     yield

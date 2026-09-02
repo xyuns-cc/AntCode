@@ -71,7 +71,6 @@ def _box(monkeypatch) -> tuple[SecretBox, Fernet]:
     monkeypatch.setattr(settings, "ENCRYPTION_KEY", primary.decode())
     monkeypatch.setattr(settings, "ENCRYPTION_KEY_SALT", "")
     monkeypatch.setattr(settings, "ENCRYPTION_KEYS_LEGACY", legacy.decode())
-    monkeypatch.setattr(settings, "ENCRYPTION_LEGACY_KDF_SALT", "")
     return SecretBox(), Fernet(legacy)
 
 
