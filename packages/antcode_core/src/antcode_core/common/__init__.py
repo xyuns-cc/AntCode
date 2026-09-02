@@ -4,7 +4,6 @@
 - config: 配置管理
 - logging: 日志配置
 - exceptions: 异常定义
-- ids: ID 生成
 - time: 时间工具
 - security: 安全相关（JWT、API Key、mTLS、权限）
 

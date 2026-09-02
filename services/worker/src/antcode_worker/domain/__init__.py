@@ -16,21 +16,6 @@ from antcode_worker.domain.errors import (
     TransportError,
     WorkerError,
 )
-from antcode_worker.domain.events import (
-    # 领域事件
-    ConnectionStateChanged,
-    DomainEvent,
-    EventBus,
-    HeartbeatFailed,
-    HeartbeatSent,
-    Signal,
-    SignalManager,
-    TaskCancelled,
-    TaskReceived,
-    TaskStatusChanged,
-    event_bus,
-    signal_manager,
-)
 from antcode_worker.domain.models import (
     ArtifactRef,
     ExecPlan,
@@ -58,17 +43,4 @@ __all__ = [
     "ExecutionError",
     "TransportError",
     "RuntimeError",
-    # Events
-    "DomainEvent",
-    "EventBus",
-    "Signal",
-    "SignalManager",
-    "event_bus",
-    "signal_manager",
-    "ConnectionStateChanged",
-    "HeartbeatSent",
-    "HeartbeatFailed",
-    "TaskReceived",
-    "TaskStatusChanged",
-    "TaskCancelled",
 ]

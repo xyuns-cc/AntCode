@@ -44,7 +44,6 @@ antcode_core/
 ```python
 from antcode_core.common import settings, setup_logging
 from antcode_core.common.exceptions import NotFoundError
-from antcode_core.common.ids import generate_run_id
 from antcode_core.infrastructure.redis import RedisClient
 from antcode_core.domain.models import Task, Worker
 ```
