@@ -21,6 +21,20 @@ class SchedulerAuthorityLost(RuntimeError):
     """The caller's Master epoch is no longer authoritative."""
 
 
+class SchedulerAuthorityNotActivated(SchedulerAuthorityLost):
+    """本任期的 epoch 还没落 PG —— 与"被更高任期顶掉"是相反方向的事实。
+
+    Leader 锁由最先轮询到的那个 loop 抢下（``lease_sweeper`` 每秒一次，最快），
+    而 epoch 落库由 ``scheduler_loop`` 的 watcher 在下一次 poll 时才做，两者之间
+    存在一个真实窗口（冷启动是亚秒级竞态，故障切换后可长达一个 watcher 轮询周期）。
+    窗口内读到的 ``current`` 只会为空或小于本任期，永远不可能大于本任期：
+    fencing token 单调递增且只发一次，比我小的代际不可能是抢走我权威的人。
+    等一轮就能自愈的"还没就绪"和必须立刻交权的"已被顶掉"共用一个信号，会让
+    启动期噪声长得和数据面事故一模一样。仍继承 ``SchedulerAuthorityLost``：
+    两者对写入方的约束相同——都不许写。
+    """
+
+
 async def activate_scheduler_authority(token: int) -> None:
     """Advance the PostgreSQL epoch at Leader activation."""
     if token < 1:
@@ -46,9 +60,12 @@ async def require_scheduler_authority(connection: Any, token: int) -> None:
     authority = (
         await SchedulerAuthority.filter(name=SCHEDULER_AUTHORITY_NAME).using_db(connection).select_for_update().first()
     )
-    if authority is None or int(authority.fencing_token) != token:
-        current = authority.fencing_token if authority is not None else None
-        raise SchedulerAuthorityLost(f"scheduler authority changed: expected={token} current={current}")
+    current = int(authority.fencing_token) if authority is not None else None
+    if current == token:
+        return
+    if current is None or current < token:
+        raise SchedulerAuthorityNotActivated(f"scheduler epoch 尚未激活: expected={token} current={current}")
+    raise SchedulerAuthorityLost(f"scheduler authority changed: expected={token} current={current}")
 
 
 async def claim_dispatch(run_id: str, token: int, status_at: datetime) -> bool:
@@ -160,6 +177,7 @@ async def reset_unpublished_dispatch(run_id: str, token: int) -> bool:
 
 __all__ = [
     "SchedulerAuthorityLost",
+    "SchedulerAuthorityNotActivated",
     "activate_scheduler_authority",
     "claim_dispatch",
     "complete_one_time_schedule",

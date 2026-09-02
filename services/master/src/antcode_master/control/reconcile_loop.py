@@ -29,7 +29,10 @@ from antcode_master.control.reconcile_repairs import (
     repair_inconsistent_states,
 )
 from antcode_master.control.retry_intent_delivery import RetryIntentDeliveryError
-from antcode_master.control.scheduler_authority import SchedulerAuthorityLost
+from antcode_master.control.scheduler_authority import (
+    SchedulerAuthorityLost,
+    SchedulerAuthorityNotActivated,
+)
 from antcode_master.leader import ensure_leader, get_fencing_token
 
 
@@ -109,6 +112,11 @@ class ReconcileLoop:
 
             except asyncio.CancelledError:
                 break
+            except SchedulerAuthorityNotActivated as exc:
+                # 抢到 Leader 锁的 loop 未必是负责把 epoch 写进 PG 的 scheduler
+                # watcher，本轮只是早到了一步；下一轮 epoch 必已就绪。
+                logger.info(f"本任期 epoch 尚未落库，跳过本轮协调: {exc}")
+                await asyncio.sleep(self.check_interval)
             except Exception:
                 logger.exception("协调循环异常")
                 await asyncio.sleep(self.check_interval)
