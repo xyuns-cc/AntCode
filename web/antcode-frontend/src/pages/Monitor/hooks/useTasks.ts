@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { taskService } from '@/services/tasks'
 import { dashboardService } from '@/services/dashboard'
-import type { MonitorTask, MonitorTaskCounts, WorkerDisplayData } from '../types'
+import { describeTaskWorkerBinding, type TaskWorkerBindingFields } from '@/utils/taskWorkerBinding'
+import type { MonitorTask, MonitorTaskCounts } from '../types'
 
 // 这里只映射后端 TaskResponse（packages/antcode_core/.../domain/schemas/task.py）真有的
 // 字段。该 schema 不提供任何任务级运行数据，历次想读的都恒定落空：
@@ -14,17 +15,16 @@ import type { MonitorTask, MonitorTaskCounts, WorkerDisplayData } from '../types
 //   Worker→Master→API 的上报链路，那是做功能，不是填值。
 //
 // 共同的教训：留着永远取不到值的列，只会把"产品没有这个数据"伪装成"数据还没加载到"。
-interface TaskResponseItem {
+interface TaskResponseItem extends TaskWorkerBindingFields {
   id: string
   name: string
-  specified_worker_id?: string | null
   status: string
 }
 
-const mapTask = (task: TaskResponseItem, workers: WorkerDisplayData[]): MonitorTask => ({
+const mapTask = (task: TaskResponseItem): MonitorTask => ({
   id: task.id,
   name: task.name,
-  worker: workers.find((worker) => worker.id === task.specified_worker_id)?.name || '未分配',
+  worker: describeTaskWorkerBinding(task),
   status:
     task.status === 'running'
       ? 'running'
@@ -37,7 +37,9 @@ const mapTask = (task: TaskResponseItem, workers: WorkerDisplayData[]): MonitorT
 
 const EMPTY_COUNTS: MonitorTaskCounts = { success: 0, failed: 0, running: 0, pending: 0 }
 
-export const useTasks = (workers: WorkerDisplayData[]) => {
+// 参数只当刷新节拍：Worker 列表每 10 秒换一次引用，任务表跟着重取。映射本身不再需要
+// 它——绑定文案取自 TaskResponse 自带的 *_worker_name，不用再拿 id 去 Worker 列表里反查。
+export const useTasks = (refreshSignal: unknown) => {
   const [tasks, setTasks] = useState<MonitorTask[]>([])
   const [counts, setCounts] = useState<MonitorTaskCounts>(EMPTY_COUNTS)
 
@@ -48,7 +50,7 @@ export const useTasks = (workers: WorkerDisplayData[]) => {
           taskService.getTasks({ page: 1, size: 20 }),
           dashboardService.getDashboardStats(),
         ])
-        setTasks((response.items || []).map((task) => mapTask(task, workers)))
+        setTasks((response.items || []).map(mapTask))
         const { total, success, failed, running } = summary.tasks
         setCounts({
           success,
@@ -61,7 +63,7 @@ export const useTasks = (workers: WorkerDisplayData[]) => {
       }
     }
     loadTasks()
-  }, [workers])
+  }, [refreshSignal])
 
   return { tasks, counts }
 }

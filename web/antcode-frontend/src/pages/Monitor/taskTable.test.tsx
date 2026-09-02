@@ -46,6 +46,7 @@ const worker: WorkerDisplayData = {
   version: 'v1.3.0',
   os: 'ubuntu',
   status: 'running',
+  hasMetrics: true,
   cpu: 12,
   memory: 34,
   disk: 56,
@@ -61,7 +62,14 @@ const emptyOptions: ChartOptions<'bar'> = {}
 describe('Monitor 任务表不展示任务级 CPU/内存', () => {
   beforeEach(() => {
     mocks.getTasks.mockResolvedValue({
-      items: [{ id: 'task-1', name: 'data-sync-daily', specified_worker_id: 'worker-1', status: 'running' }],
+      items: [{
+        id: 'task-1',
+        name: 'data-sync-daily',
+        execution_strategy: 'specified',
+        specified_worker_id: 'worker-1',
+        specified_worker_name: 'node-01',
+        status: 'running',
+      }],
       total: 1,
       page: 1,
       size: 20,
@@ -83,7 +91,7 @@ describe('Monitor 任务表不展示任务级 CPU/内存', () => {
       />
     )
 
-    expect(headerTitles(container)).toEqual(['序号', '任务名称', '执行 Worker', '状态', '操作'])
+    expect(headerTitles(container)).toEqual(['序号', '任务名称', 'Worker 绑定', '状态', '操作'])
     // 行数据确实渲染到了这些列上，否则上面的列清单可能只是一张空壳表。
     expect(screen.getByText('data-sync-daily')).toBeInTheDocument()
     expect(screen.getByText('node-01')).toBeInTheDocument()

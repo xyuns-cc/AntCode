@@ -1,19 +1,21 @@
 import React, { useEffect, useState, useRef, useCallback, memo } from 'react'
 import { Row, Col, Card, Progress, Button, Tabs, Flex, Typography, Skeleton, theme, Tooltip, Alert } from 'antd'
 import {
-  ClusterOutlined, ProjectOutlined, CheckCircleOutlined, SyncOutlined, MonitorOutlined,
-  ClockCircleOutlined, DashboardOutlined, BugOutlined, CloudServerOutlined,
-  ExclamationCircleOutlined, PlayCircleOutlined, ThunderboltOutlined,
+  ClusterOutlined, CheckCircleOutlined, SyncOutlined, MonitorOutlined,
+  ClockCircleOutlined, DashboardOutlined, BugOutlined,
+  ThunderboltOutlined,
   FieldTimeOutlined, DatabaseOutlined, GlobalOutlined
 } from '@ant-design/icons'
 import { dashboardService, systemHealthFromMetrics, type DashboardStats, type SystemMetrics, type HourlyTrendItem } from '@/services/dashboard'
 import { workerService } from '@/services/workers'
 import type { WorkerAggregateStats, ClusterSpiderStats } from '@/types'
 import SpiderStatsTab from '@/components/workers/SpiderStatsTab'
-import StatCard from '@/components/common/StatCard'
 import PageContainer from '@/components/common/PageContainer'
 import { successRateView } from '@/utils/spiderSuccessRate'
+import OverviewCards from './OverviewCards'
 import ResourceBar from './ResourceBar'
+import TaskStatusPanel from './TaskStatusPanel'
+import { NO_DATA, formatCount, formatRatio, summarizeRecentTasks } from './present'
 
 const MonitorTab = React.lazy(() => import('@/pages/Monitor'))
 const { Title, Text } = Typography
@@ -30,7 +32,9 @@ const Dashboard: React.FC = memo(() => {
   const [systemMetrics, setSystemMetrics] = useState<SystemMetrics | null>(null)
   const [workerStats, setWorkerStats] = useState<WorkerAggregateStats | null>(null)
   const [spiderStats, setSpiderStats] = useState<ClusterSpiderStats | null>(null)
-  const [hourlyTrend, setHourlyTrend] = useState<HourlyTrendItem[]>([])
+  // null = 还没拿到（首次加载中，或这一路请求失败）。空数组是后端不会返回的形状，
+  // 拿它当"没数据"会和"24 小时里真的一个任务都没跑"混为一谈。
+  const [hourlyTrend, setHourlyTrend] = useState<HourlyTrendItem[] | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [activeTab, setActiveTab] = useState('overview')
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -38,15 +42,17 @@ const Dashboard: React.FC = memo(() => {
   // 用于追踪是否已完成首次加载
   const isInitialLoadDone = useRef(false)
 
-  const normalizePercent = (value: unknown): number => {
+  // 采不到就是 null：以前非有限值兜成 0，管理员之外的用户看到的是「CPU 0%」的满绿面板。
+  const normalizePercent = (value: unknown): number | null => {
     const n = Number(value)
-    return Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : 0
+    return Number.isFinite(n) ? Math.min(100, Math.max(0, Math.round(n))) : null
   }
 
   const cpuPercent = normalizePercent(systemMetrics?.cpu_usage?.percent)
   const memoryPercent = normalizePercent(systemMetrics?.memory_usage?.percent)
   const diskPercent = normalizePercent(systemMetrics?.disk_usage?.percent)
   const spiderSuccess = successRateView(spiderStats, token)
+  const recentTasks = hourlyTrend === null ? null : summarizeRecentTasks(hourlyTrend)
 
   // 无感刷新：后台静默获取数据
   const loadDashboardData = useCallback(async (silent = false) => {
@@ -123,12 +129,6 @@ const Dashboard: React.FC = memo(() => {
     return () => clearInterval(id)
   }, [loadDashboardData])
 
-  const formatNumber = (n: number) => {
-    if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
-    if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
-    return n.toString()
-  }
-
   // 系统健康状态。取的是真的 systemMetrics：之前读的 dashboardStats.system.status
   // 由 getDashboardStats 恒定填 'normal'（阈值函数从没被调用过），于是 CPU 打满也报「健康」。
   const systemHealth = systemHealthFromMetrics(systemMetrics)
@@ -200,178 +200,23 @@ const Dashboard: React.FC = memo(() => {
             children: (
               <Skeleton loading={initialLoading} active paragraph={{ rows: 12 }}>
                 {/* 第一行：核心汇总指标 */}
-                <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
-                  <Col xs={24} sm={12} lg={6}>
-                    <StatCard
-                      title="Worker 状态"
-                      value={`${workerStats?.onlineWorkers ?? 0} / ${workerStats?.totalWorkers ?? 0}`}
-                      subValue="当前在线Worker数"
-                      icon={<CloudServerOutlined />}
-
-                      iconColor={token.colorPrimary}
-                      loading={initialLoading}
-                    />
-                  </Col>
-                  <Col xs={24} sm={12} lg={6}>
-                    <StatCard
-                      title="项目统计"
-                      value={`${dashboardStats?.projects.active ?? 0} / ${dashboardStats?.projects.total ?? 0}`}
-                      subValue="活跃/总项目数"
-                      icon={<ProjectOutlined />}
-
-                      iconColor={token.purple}
-                      loading={initialLoading}
-                    />
-                  </Col>
-                  <Col xs={24} sm={12} lg={6}>
-                    <StatCard
-                      title="今日完成任务"
-                      value={formatNumber(dashboardStats?.tasks.success ?? 0)}
-                      subValue={`成功率 ${systemMetrics?.success_rate?.toFixed(1) ?? 0}%`}
-                      icon={<CheckCircleOutlined />}
-
-                      iconColor={token.colorSuccess}
-                      loading={initialLoading}
-                    />
-                  </Col>
-                  <Col xs={24} sm={12} lg={6}>
-                    <StatCard
-                      title="今日异常"
-                      value={dashboardStats?.tasks.failed ?? 0}
-                      subValue="需要关注的失败任务"
-                      icon={<ExclamationCircleOutlined />}
-
-                      iconColor={token.colorError}
-                      loading={initialLoading}
-                    />
-                  </Col>
-                </Row>
+                <OverviewCards
+                  workerStats={workerStats}
+                  dashboardStats={dashboardStats}
+                  recent={recentTasks}
+                  loading={initialLoading}
+                />
 
                 {/* 第二行：任务状态 & 系统资源 */}
                 <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
                   {/* 任务执行状态 */}
                   <Col xs={24} lg={16}>
-                    <Card
-                      title={<><PlayCircleOutlined style={{ marginRight: 8, color: token.colorTextSecondary }} />任务执行状态</>}
-                      style={{ borderRadius: 16, height: '100%' }}
-                      styles={{ body: { display: 'flex', flexDirection: 'column', height: 'calc(100% - 57px)' } }}
-                    >
-                      <Row gutter={[16, 16]}>
-                        <Col xs={12} sm={6}>
-                          <div style={{
-                            background: token.colorFillQuaternary,
-                            padding: 16,
-                            borderRadius: 12,
-                            textAlign: 'center',
-                            border: `1px solid ${token.colorBorderSecondary}`
-                          }}>
-                            <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>运行中</Text>
-                            <div style={{ fontSize: 24, fontWeight: 700, color: token.colorInfo, marginTop: 4 }}>
-                              {dashboardStats?.tasks.running ?? 0}
-                            </div>
-                          </div>
-                        </Col>
-                        <Col xs={12} sm={6}>
-                          <div style={{
-                            background: token.colorFillQuaternary,
-                            padding: 16,
-                            borderRadius: 12,
-                            textAlign: 'center',
-                            border: `1px solid ${token.colorBorderSecondary}`
-                          }}>
-                            <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>队列中</Text>
-                            <div style={{ fontSize: 24, fontWeight: 700, color: token.colorWarning, marginTop: 4 }}>
-                              {systemMetrics?.queue_size ?? 0}
-                            </div>
-                          </div>
-                        </Col>
-                        <Col xs={12} sm={6}>
-                          <div style={{
-                            background: token.colorFillQuaternary,
-                            padding: 16,
-                            borderRadius: 12,
-                            textAlign: 'center',
-                            border: `1px solid ${token.colorBorderSecondary}`
-                          }}>
-                            <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>今日成功</Text>
-                            <div style={{ fontSize: 24, fontWeight: 700, color: token.colorSuccess, marginTop: 4 }}>
-                              {formatNumber(dashboardStats?.tasks.success ?? 0)}
-                            </div>
-                          </div>
-                        </Col>
-                        <Col xs={12} sm={6}>
-                          <div style={{
-                            background: token.colorFillQuaternary,
-                            padding: 16,
-                            borderRadius: 12,
-                            textAlign: 'center',
-                            border: `1px solid ${token.colorBorderSecondary}`
-                          }}>
-                            <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>今日失败</Text>
-                            <div style={{ fontSize: 24, fontWeight: 700, color: token.colorError, marginTop: 4 }}>
-                              {dashboardStats?.tasks.failed ?? 0}
-                            </div>
-                          </div>
-                        </Col>
-                      </Row>
-
-                      {/* 24小时任务趋势图 */}
-                      <div style={{ marginTop: 16, flex: 1, display: 'flex', flexDirection: 'column' }}>
-                        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, flex: 1, minHeight: 120 }}>
-                          {(() => {
-                            // 使用真实的24小时趋势数据
-                            const data = hourlyTrend.length > 0 ? hourlyTrend : Array.from({ length: 24 }, (_, i) => ({ hour: i, tasks: 0, success: 0, failed: 0 }))
-                            const maxTasks = Math.max(...data.map(d => d.tasks), 1)
-                            return data.map((item, i) => {
-                              const heightPercent = maxTasks > 0 ? Math.max((item.tasks / maxTasks) * 100, 5) : 5
-                              return (
-                                <Tooltip
-                                  key={i}
-                                  title={
-                                    <div style={{ textAlign: 'center' }}>
-                                      <div style={{ fontWeight: 600 }}>{`${item.hour.toString().padStart(2, '0')}:00`}</div>
-                                      <div>{`${item.tasks} 个任务`}</div>
-                                      <div style={{ color: token.colorSuccess }}>{`成功: ${item.success}`}</div>
-                                      <div style={{ color: token.colorError }}>{`失败: ${item.failed}`}</div>
-                                    </div>
-                                  }
-                                  placement="top"
-                                >
-                                  <div
-                                    style={{
-                                      flex: 1,
-                                      height: `${heightPercent}%`,
-                                      background: `${token.colorPrimary}40`,
-                                      borderRadius: '3px 3px 0 0',
-                                      transition: 'all 0.2s ease',
-                                      cursor: 'pointer',
-                                      transformOrigin: 'bottom'
-                                    }}
-                                    onMouseEnter={(e) => {
-                                      e.currentTarget.style.background = token.colorPrimary
-                                      e.currentTarget.style.transform = 'scaleY(1.05)'
-                                    }}
-                                    onMouseLeave={(e) => {
-                                      e.currentTarget.style.background = `${token.colorPrimary}40`
-                                      e.currentTarget.style.transform = 'scaleY(1)'
-                                    }}
-                                  />
-                                </Tooltip>
-                              )
-                            })
-                          })()}
-                        </div>
-                        {/* X轴时间标签 */}
-                        <Flex justify="space-between" style={{ padding: '0 2px', marginTop: 4 }}>
-                          {['00:00', '06:00', '12:00', '18:00', '24:00'].map((label) => (
-                            <Text key={label} type="secondary" style={{ fontSize: 10 }}>{label}</Text>
-                          ))}
-                        </Flex>
-                        <Text type="secondary" style={{ fontSize: 11, display: 'block', textAlign: 'center', marginTop: 4 }}>
-                          过去 24 小时任务处理趋势（单位：任务数/小时）
-                        </Text>
-                      </div>
-                    </Card>
+                    <TaskStatusPanel
+                      dashboardStats={dashboardStats}
+                      systemMetrics={systemMetrics}
+                      recent={recentTasks}
+                      hourlyTrend={hourlyTrend}
+                    />
                   </Col>
 
                   {/* Master 资源监控 */}
@@ -403,7 +248,7 @@ const Dashboard: React.FC = memo(() => {
                           <div>
                             <Text type="secondary" style={{ fontSize: 12 }}>存储Worker连接状态</Text>
                             <div style={{ fontSize: 13, fontWeight: 600 }}>
-                              {workerStats?.onlineWorkers ?? 0}/{workerStats?.totalWorkers ?? 0} Worker 就绪
+                              {formatRatio(workerStats?.onlineWorkers, workerStats?.totalWorkers)} Worker 就绪
                             </div>
                           </div>
                         </Flex>
@@ -424,7 +269,7 @@ const Dashboard: React.FC = memo(() => {
                           <ThunderboltOutlined style={{ marginRight: 4 }} />请求总数
                         </Text>
                         <span style={{ fontSize: 28, fontWeight: 700 }}>
-                          {formatNumber(spiderStats?.totalRequests ?? 0)}
+                          {formatCount(spiderStats?.totalRequests)}
                         </span>
                         <Text type="success" style={{ fontSize: 12, marginTop: 4 }}>
                           ↑ 实时统计
@@ -465,7 +310,7 @@ const Dashboard: React.FC = memo(() => {
                           <DatabaseOutlined style={{ marginRight: 4 }} />累计抓取数据
                         </Text>
                         <span style={{ fontSize: 28, fontWeight: 700 }}>
-                          {formatNumber(spiderStats?.totalItemsScraped ?? 0)}
+                          {formatCount(spiderStats?.totalItemsScraped)}
                         </span>
                         <Text type="secondary" style={{ fontSize: 12, marginTop: 4 }}>
                           数据项
@@ -478,7 +323,7 @@ const Dashboard: React.FC = memo(() => {
                           <FieldTimeOutlined style={{ marginRight: 4 }} />平均响应延迟
                         </Text>
                         <span style={{ fontSize: 28, fontWeight: 700, color: token.colorPrimary }}>
-                          {spiderStats?.avgLatencyMs?.toFixed(0) ?? 0} ms
+                          {spiderStats ? `${spiderStats.avgLatencyMs.toFixed(0)} ms` : NO_DATA}
                         </span>
                         <Flex gap={2} style={{ marginTop: 8 }}>
                           {[3, 4, 3, 5, 2, 4, 6, 3].map((h, i) => (

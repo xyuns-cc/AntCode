@@ -50,7 +50,7 @@ import PageContainer from '@/components/common/PageContainer'
 import FilterBar from '@/components/common/FilterBar'
 import ResponsiveTable from '@/components/common/ResponsiveTable'
 import WorkerInstallKeyModals from '@/components/workers/WorkerInstallKeyModals'
-import { renderMetricCell } from '@/components/workers/WorkerMetricCell'
+import { NO_METRICS_PLACEHOLDER, renderMetricCell } from '@/components/workers/WorkerMetricCell'
 import WorkerResourceManagement from '@/components/workers/WorkerResourceManagement'
 import WorkerSpiderStats from '@/components/workers/WorkerSpiderStats'
 import { useWorkerStore } from '@/stores/workerStore'
@@ -60,6 +60,7 @@ import type { WorkerUserPermission } from '@/services/workerServiceContracts'
 import { userService } from '@/services/users'
 import type { Worker, WorkerStatus } from '@/types'
 import { formatDateTime } from '@/utils/format'
+import { averageReportedUsage } from '@/utils/metricAverage'
 import showNotification from '@/utils/notification'
 
 const { Search } = Input
@@ -190,12 +191,9 @@ const Workers: React.FC = () => {
     totalTasks: visibleWorkers.reduce((sum, n) => sum + (n.metrics?.taskCount || 0), 0),
     runningTasks: visibleWorkers.reduce((sum, n) => sum + (n.metrics?.runningTasks || 0), 0),
     totalProjects: visibleWorkers.reduce((sum, n) => sum + (n.metrics?.projectCount || 0), 0),
-    avgCpu: visibleWorkers.length > 0
-      ? Math.round(visibleWorkers.reduce((sum, n) => sum + (n.metrics?.cpu || 0), 0) / visibleWorkers.length)
-      : 0,
-    avgMemory: visibleWorkers.length > 0
-      ? Math.round(visibleWorkers.reduce((sum, n) => sum + (n.metrics?.memory || 0), 0) / visibleWorkers.length)
-      : 0
+    // 均值口径见 averageReportedUsage：没上报过指标的机器不进分母，一台都没有时是 null。
+    avgCpu: averageReportedUsage(visibleWorkers.map(n => n.metrics?.cpu)),
+    avgMemory: averageReportedUsage(visibleWorkers.map(n => n.metrics?.memory))
   }), [visibleWorkers])
 
   // 编辑Worker
@@ -623,10 +621,10 @@ const Workers: React.FC = () => {
             <Card size="small"><Statistic title="总任务" value={stats.totalTasks} suffix={<Text type="secondary" style={{ fontSize: 12 }}>/ {stats.runningTasks} 运行中</Text>} /></Card>
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
-            <Card size="small"><Statistic title="平均 CPU" value={stats.avgCpu} suffix="%" valueStyle={{ color: stats.avgCpu > 80 ? '#ff4d4f' : undefined }} /></Card>
+            <Card size="small"><Statistic title="平均 CPU" value={stats.avgCpu ?? NO_METRICS_PLACEHOLDER} suffix={stats.avgCpu === null ? undefined : '%'} valueStyle={{ color: stats.avgCpu !== null && stats.avgCpu > 80 ? '#ff4d4f' : undefined }} /></Card>
           </Col>
           <Col xs={12} sm={8} md={6} lg={4}>
-            <Card size="small"><Statistic title="平均内存" value={stats.avgMemory} suffix="%" valueStyle={{ color: stats.avgMemory > 80 ? '#ff4d4f' : undefined }} /></Card>
+            <Card size="small"><Statistic title="平均内存" value={stats.avgMemory ?? NO_METRICS_PLACEHOLDER} suffix={stats.avgMemory === null ? undefined : '%'} valueStyle={{ color: stats.avgMemory !== null && stats.avgMemory > 80 ? '#ff4d4f' : undefined }} /></Card>
           </Col>
         </Row>
       }

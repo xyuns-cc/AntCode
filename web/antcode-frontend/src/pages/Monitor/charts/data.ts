@@ -1,4 +1,5 @@
 import type { ChartData } from 'chart.js'
+import { averageReportedUsage } from '@/utils/metricAverage'
 import { formatTimeLabel } from '../data'
 import type {
   ClusterHistory,
@@ -9,23 +10,28 @@ import type {
 } from '../types'
 
 interface ClusterMetrics {
-  avgCpu: number
-  avgMem: number
-  maxCpu: number
-  maxMem: number
-  minCpu: number
-  minMem: number
+  avgCpu: number | null
+  avgMem: number | null
+  maxCpu: number | null
+  maxMem: number | null
+  minCpu: number | null
+  minMem: number | null
 }
 
+const NO_CLUSTER_METRICS: ClusterMetrics = {
+  avgCpu: null, avgMem: null, maxCpu: null, maxMem: null, minCpu: null, minMem: null,
+}
+
+// 没上报过指标的机器既不进均值分母、也不参与极值：按 0 计入会稀释均值，还会把
+// 「集群最小 CPU」永久钉在 0。分母口径与后端 worker_stats_service 一致（见 metricAverage）。
 export const calculateClusterMetrics = (workers: WorkerDisplayData[]): ClusterMetrics => {
-  if (workers.length === 0) {
-    return { avgCpu: 0, avgMem: 0, maxCpu: 0, maxMem: 0, minCpu: 0, minMem: 0 }
-  }
-  const cpu = workers.map((worker) => worker.cpu)
-  const memory = workers.map((worker) => worker.memory)
+  const reported = workers.filter((worker) => worker.hasMetrics)
+  if (reported.length === 0) return NO_CLUSTER_METRICS
+  const cpu = reported.map((worker) => worker.cpu)
+  const memory = reported.map((worker) => worker.memory)
   return {
-    avgCpu: Math.round(cpu.reduce((sum, value) => sum + value, 0) / workers.length),
-    avgMem: Math.round(memory.reduce((sum, value) => sum + value, 0) / workers.length),
+    avgCpu: averageReportedUsage(cpu),
+    avgMem: averageReportedUsage(memory),
     maxCpu: Math.max(...cpu),
     maxMem: Math.max(...memory),
     minCpu: Math.min(...cpu),

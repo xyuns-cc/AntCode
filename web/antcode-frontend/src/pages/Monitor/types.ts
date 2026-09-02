@@ -8,6 +8,9 @@ export interface WorkerDisplayData {
   version: string
   os: WorkerOs
   status: WorkerDisplayStatus
+  // 这台机器上报过指标吗。cpu/memory/disk 缺指标时取 0（阈值判定与条形图都要数字），
+  // 光看它们分不出「真的 0%」和「没上报过」，集群均值必须靠这个标志把后者排除掉。
+  hasMetrics: boolean
   cpu: number
   memory: number
   disk: number

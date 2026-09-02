@@ -25,7 +25,9 @@ const buildColumns = (onViewTask: (taskId: string) => void): ColumnsType<Monitor
     title: '任务名称', dataIndex: 'name', key: 'name', width: 220, ellipsis: { showTitle: false },
     render: (name: string) => <Tooltip title={name} placement="topLeft"><span>{name}</span></Tooltip>,
   },
-  { title: '执行 Worker', dataIndex: 'worker', key: 'worker', width: 140 },
+  // 「绑定」而不是「执行」：值是任务的 Worker 配置，后端任务列表不提供实际执行在哪台
+  // （见 describeTaskWorkerBinding）。列名说「执行」就是把配置值冒充成生效值。
+  { title: 'Worker 绑定', dataIndex: 'worker', key: 'worker', width: 140 },
   {
     title: '状态', dataIndex: 'status', key: 'status', width: 100,
     render: (status: string) => <Tag color={getStatusColor(status)}>{getStatusText(status)}</Tag>,

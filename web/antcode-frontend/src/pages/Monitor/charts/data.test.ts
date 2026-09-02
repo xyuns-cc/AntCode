@@ -1,7 +1,61 @@
 import { describe, expect, it } from 'vitest'
 
-import { createTaskStatsData, createTrendData } from './data'
-import type { ClusterHistory } from '../types'
+import { calculateClusterMetrics, createTaskStatsData, createTrendData } from './data'
+import type { ClusterHistory, WorkerDisplayData } from '../types'
+
+const displayWorker = (overrides: Partial<WorkerDisplayData>): WorkerDisplayData => ({
+  id: 'w-1',
+  name: 'node-1',
+  version: 'v1.0.0',
+  os: 'linux',
+  status: 'running',
+  hasMetrics: true,
+  cpu: 0,
+  memory: 0,
+  disk: 0,
+  tasks: 0,
+  uptime: '1小时 0分钟',
+  host: '127.0.0.1',
+  port: 8000,
+  ...overrides,
+})
+
+// 监控页的 transformWorker 把缺指标的机器压成 cpu=0，集群统计过去照单全收：4 台里
+// 3 台没心跳时 12% 被除成 3%，集群最小 CPU 还被永久钉在 0。分母口径见 metricAverage，
+// 与后端 worker_stats_service.get_aggregate_stats 一致。
+describe('calculateClusterMetrics 把没有指标的机器排除在分母和极值之外', () => {
+  it('只统计上报过指标的机器', () => {
+    const metrics = calculateClusterMetrics([
+      displayWorker({ id: 'a', hasMetrics: true, cpu: 12, memory: 40 }),
+      displayWorker({ id: 'b', hasMetrics: false, cpu: 0, memory: 0 }),
+      displayWorker({ id: 'c', hasMetrics: false, cpu: 0, memory: 0 }),
+      displayWorker({ id: 'd', hasMetrics: false, cpu: 0, memory: 0 }),
+    ])
+
+    // 旧实现：avgCpu 12/4=3、minCpu=0。全等断言同时钉正值与错值。
+    expect(metrics).toEqual({
+      avgCpu: 12, avgMem: 40, maxCpu: 12, maxMem: 40, minCpu: 12, minMem: 40,
+    })
+  })
+
+  it('真的上报了 0% 的机器照常参与', () => {
+    const metrics = calculateClusterMetrics([
+      displayWorker({ id: 'a', hasMetrics: true, cpu: 12, memory: 40 }),
+      displayWorker({ id: 'b', hasMetrics: true, cpu: 0, memory: 0 }),
+    ])
+
+    expect(metrics.avgCpu).toBe(6)
+    expect(metrics.minCpu).toBe(0)
+  })
+
+  it('一台都没上报过时是 null，不是 0', () => {
+    const metrics = calculateClusterMetrics([displayWorker({ hasMetrics: false })])
+
+    expect(metrics).toEqual({
+      avgCpu: null, avgMem: null, maxCpu: null, maxMem: null, minCpu: null, minMem: null,
+    })
+  })
+})
 
 describe('createTaskStatsData', () => {
   it('uses full server aggregates instead of the preview task page', () => {

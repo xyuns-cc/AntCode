@@ -31,6 +31,7 @@ import { formatDateTime, formatStatus, TASK_STATUS_PRESENTATION } from '@/utils/
 import type { StatusPresentation } from '@/utils/format'
 import useAuth from '@/hooks/useAuth'
 import { debounce } from '@/utils/helpers'
+import { describeTaskWorkerBinding } from '@/utils/taskWorkerBinding'
 import { describeBatchFailures } from '@/services/batchOutcome'
 import { useProjectsQuery, useTasksQuery, useTaskMutations } from '@/hooks/api/useTasks'
 
@@ -447,24 +448,11 @@ const Tasks: React.FC = memo(() => {
               responsive: ['lg'],
               render: (_: string, record: Task) => {
                 const strategy = record.execution_strategy || record.project_execution_strategy
-
-                let workerName = '本地'
-                let icon = <DesktopOutlined style={{ fontSize: 12 }} />
-                let color: string = 'geekblue'
-
-                if (strategy === 'auto') {
-                  workerName = '自动选择'
-                  icon = <CloudServerOutlined style={{ fontSize: 12 }} />
-                  color = 'green'
-                } else if (strategy === 'specified') {
-                  workerName = record.specified_worker_name || record.specified_worker_id || '指定 Worker'
-                  icon = <CloudServerOutlined style={{ fontSize: 12 }} />
-                  color = 'cyan'
-                } else if (strategy === 'fixed' || strategy === 'prefer') {
-                  workerName = record.project_bound_worker_name || record.project_bound_worker_id || '绑定 Worker'
-                  icon = <CloudServerOutlined style={{ fontSize: 12 }} />
-                  color = 'blue'
-                }
+                // 文案口径只有 describeTaskWorkerBinding 一处，监控页那张表读的是同一个函数。
+                const workerName = describeTaskWorkerBinding(record)
+                const isBound = strategy === 'auto' || strategy === 'specified' || strategy === 'fixed' || strategy === 'prefer'
+                const icon = isBound ? <CloudServerOutlined style={{ fontSize: 12 }} /> : <DesktopOutlined style={{ fontSize: 12 }} />
+                const color = strategy === 'auto' ? 'green' : strategy === 'specified' ? 'cyan' : isBound ? 'blue' : 'geekblue'
                 return (
                   <Tooltip title={workerName} placement="topLeft">
                     <Tag 

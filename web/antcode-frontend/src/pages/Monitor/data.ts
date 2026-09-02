@@ -68,6 +68,7 @@ export const transformWorker = (worker: Worker): WorkerDisplayData => ({
   version: worker.version || 'v1.0.0',
   os: mapOsType(worker.osType),
   status: getDisplayStatus(worker),
+  hasMetrics: worker.metrics != null,
   cpu: worker.metrics?.cpu || 0,
   memory: worker.metrics?.memory || 0,
   disk: worker.metrics?.disk || 0,

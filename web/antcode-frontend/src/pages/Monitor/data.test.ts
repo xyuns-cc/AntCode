@@ -1,12 +1,43 @@
 import { describe, expect, it } from 'vitest'
 
 import * as monitorData from './data'
-import { createAlerts } from './data'
+import { createAlerts, transformWorker } from './data'
+import type { Worker } from '@/types'
 import type { WorkerDisplayData } from './types'
 
 describe('Monitor data contracts', () => {
   it('does not present derived Worker state as authoritative logs', () => {
     expect(monitorData).not.toHaveProperty('createWorkerLogs')
+  })
+})
+
+const apiWorker = (metrics: Worker['metrics']): Worker => ({
+  id: 'w-1',
+  name: 'node-1',
+  host: '127.0.0.1',
+  port: 8000,
+  status: 'online',
+  metrics,
+  createdAt: '2026-01-01T00:00:00Z',
+})
+
+// cpu/memory/disk 缺指标时压成 0（阈值判定与条形图都要数字），所以"这台报过没有"必须
+// 由 hasMetrics 单独承载 —— 集群均值靠它把没上报的机器排除出分母。它要是恒 true，
+// calculateClusterMetrics 的用例全都还是绿的，这条就是那道防线。
+describe('transformWorker 保留「这台上报过指标吗」', () => {
+  it('metrics 为空时 hasMetrics 为 false，且不谎称 0%', () => {
+    expect(transformWorker(apiWorker(null)).hasMetrics).toBe(false)
+    expect(transformWorker(apiWorker(undefined)).hasMetrics).toBe(false)
+  })
+
+  it('上报过就是 true —— 包括真的报了 0% 的那台', () => {
+    const reported = {
+      cpu: 0, memory: 0, disk: 0, taskCount: 0, runningTasks: 0,
+      projectCount: 0, envCount: 0, uptime: 0,
+    }
+
+    expect(transformWorker(apiWorker(reported)).hasMetrics).toBe(true)
+    expect(transformWorker(apiWorker({ ...reported, cpu: 12 })).cpu).toBe(12)
   })
 })
 
@@ -16,6 +47,7 @@ const worker = (overrides: Partial<WorkerDisplayData>): WorkerDisplayData => ({
   version: 'v1.0.0',
   os: 'linux',
   status: 'running',
+  hasMetrics: true,
   cpu: 0,
   memory: 0,
   disk: 0,

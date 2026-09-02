@@ -320,15 +320,15 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
     { title: '平均延迟', dataIndex: 'latency', key: 'latency', align: 'right' as const, render: (val: number) => <Text code>{val} ms</Text> }
   ]
 
-  const responseCount = Object.values(stats?.statusCodes ?? {}).reduce((sum, count) => sum + count, 0)
-  const successCount = Object.entries(stats?.statusCodes ?? {})
-    .filter(([code]) => code.startsWith('2'))
-    .reduce((sum, [, count]) => sum + count, 0)
-  const errorCount = Object.entries(stats?.statusCodes ?? {})
-    .filter(([code]) => code.startsWith('4') || code.startsWith('5'))
-    .reduce((sum, [, count]) => sum + count, 0)
-  const httpSuccessRate = responseCount ? successCount / responseCount * 100 : 0
-  const httpErrorRate = responseCount ? errorCount / responseCount * 100 : 0
+  // 分母是响应数：这是状态码分布卡，2xx 占比只对收到的响应有定义，与「爬取成功率」（分母
+  // 为请求总数，见 utils/spiderSuccessRate）是两件事。空集不是 0%，是没有样本可分布。
+  const codeCounts = Object.entries(stats?.statusCodes ?? {})
+  const countWithPrefix = (...prefixes: string[]) =>
+    codeCounts.filter(([code]) => prefixes.some((p) => code.startsWith(p))).reduce((sum, [, n]) => sum + n, 0)
+  const responseCount = codeCounts.reduce((sum, [, n]) => sum + n, 0)
+  const httpShare = (part: number) => (responseCount ? `${(part / responseCount * 100).toFixed(1)}%` : '—')
+  const httpSuccessShare = httpShare(countWithPrefix('2'))
+  const httpErrorShare = httpShare(countWithPrefix('4', '5'))
 
   return (
     <Skeleton loading={loading} active paragraph={{ rows: 12 }}>
@@ -363,8 +363,8 @@ const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null)
           <Card title={<Flex align="center" gap={6}><PieChartOutlined style={{ color: '#722ed1' }} /><span style={{ fontSize: 14 }}>HTTP 状态码分布</span></Flex>} extra={<Tooltip title={`${lastUpdate.toLocaleTimeString()} 更新`}><Button type="text" size="small" icon={<SyncOutlined spin={refreshing} />}>{stats?.workerCount || 0} Worker</Button></Tooltip>} style={{ borderRadius: 12, height: '100%' }} styles={{ body: { padding: '12px 16px' } }}>
             <div style={{ height: 180 }}>{statusCodeData ? <Doughnut data={statusCodeData} options={doughnutOptions} /> : <Empty description="暂无数据" />}</div>
             <Row gutter={8} style={{ marginTop: 12 }}>
-              <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Error (4xx/5xx)</Text><Text strong style={{ color: token.colorError, fontSize: 12 }}>{httpErrorRate.toFixed(1)}%</Text></div></Col>
-              <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Success (2xx)</Text><Text strong style={{ color: token.colorSuccess, fontSize: 12 }}>{httpSuccessRate.toFixed(1)}%</Text></div></Col>
+              <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Error (4xx/5xx)</Text><Text strong style={{ color: token.colorError, fontSize: 12 }}>{httpErrorShare}</Text></div></Col>
+              <Col span={12}><div style={{ background: token.colorBgContainerDisabled, padding: '8px 10px', borderRadius: 8, display: 'flex', justifyContent: 'space-between' }}><Text type="secondary" style={{ fontSize: 12 }}>Success (2xx)</Text><Text strong style={{ color: token.colorSuccess, fontSize: 12 }}>{httpSuccessShare}</Text></div></Col>
             </Row>
           </Card>
         </Col>
