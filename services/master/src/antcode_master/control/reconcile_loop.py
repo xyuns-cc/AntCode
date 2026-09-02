@@ -19,8 +19,12 @@ import asyncio
 import contextlib
 from datetime import UTC, datetime
 
+from antcode_core.application.services.crawl.batch_dispatcher_service import (
+    DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS,
+)
 from antcode_core.domain.models import TaskRun
 from antcode_core.domain.models.enums import RuntimeStatus, TaskStatus
+from antcode_core.domain.models.task_run import TASK_ID_ABSENT
 from loguru import logger
 
 from antcode_master.control.reconcile_failure_settlement import settle_runtime_failure_snapshot
@@ -264,6 +268,20 @@ async def _load_task_timeouts(candidates: list[TaskRun]) -> dict[int, int]:
     return {task.id: int(task.timeout_seconds or 0) for task in tasks}
 
 
+def _run_timeout_seconds(run: TaskRun, timeout_map: dict[int, int], fallback_threshold: int) -> int:
+    """判超时必须用**派发时给出的**预算，否则 reconcile 会杀掉还在跑的 run。
+
+    批次 run 以 ``TASK_ID_ABSENT`` 创建、``scheduled_tasks`` 里没有对应行，
+    ``timeout_map`` 永远查不到它；落到 reconcile 自己的 300s 兜底，而
+    ``batch_dispatcher_service`` 发给 Worker 的预算是 3600s —— 任何超过 5 分钟
+    的爬取 run 都会在 Worker 仍在抓取时被判 TIMEOUT。死掉的 Worker 由 lease
+    失租回收覆盖，不依赖这里把阈值压低。
+    """
+    if run.task_id == TASK_ID_ABSENT:
+        return DEFAULT_CRAWL_TASK_TIMEOUT_SECONDS
+    return timeout_map.get(run.task_id, 0) or fallback_threshold
+
+
 def _expired_runs(
     candidates: list[TaskRun],
     timeout_map: dict[int, int],
@@ -276,7 +294,7 @@ def _expired_runs(
         anchor = run.start_time or run.last_heartbeat or run.created_at
         if anchor is None:
             continue
-        timeout = timeout_map.get(run.task_id, 0) or fallback_threshold
+        timeout = _run_timeout_seconds(run, timeout_map, fallback_threshold)
         if (now - anchor).total_seconds() > timeout:
             expired.append(run)
     return expired
