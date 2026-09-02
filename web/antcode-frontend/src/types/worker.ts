@@ -128,7 +128,8 @@ export interface WorkerAggregateStats {
   totalResponses: number
   totalItemsScraped: number
   totalErrors: number
-  avgLatencyMs: number
+  /** null = 一条响应都没发生过（不是「平均 0ms」），与 avgCpu 同一口径 */
+  avgLatencyMs: number | null
   clusterRequestsPerMinute: number
 }
 

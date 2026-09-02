@@ -69,7 +69,9 @@ class WorkerStatsService:
         # 逐字节相同。上一轮把漂移机器整体退出统计后,全集群漂移就成了一条可达路径。
         avg_cpu = round(total_cpu / workers_with_metrics, 1) if workers_with_metrics else None
         avg_memory = round(total_memory / workers_with_metrics, 1) if workers_with_metrics else None
-        avg_latency = total_latency_weighted / total_responses if total_responses > 0 else 0.0
+        # 同一个形状，分母换成响应数：一条响应都没发生过时的 0.0 与"每条响应都是 0ms"
+        # 逐字节相同。
+        avg_latency = round(total_latency_weighted / total_responses, 2) if total_responses else None
 
         return WorkerAggregateStats(
             totalWorkers=total_workers,
@@ -87,7 +89,7 @@ class WorkerStatsService:
             totalResponses=total_responses,
             totalItemsScraped=total_items_scraped,
             totalErrors=total_errors,
-            avgLatencyMs=round(avg_latency, 2),
+            avgLatencyMs=avg_latency,
             clusterRequestsPerMinute=round(total_rpm, 2),
         )
 

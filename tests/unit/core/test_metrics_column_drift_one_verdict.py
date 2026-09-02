@@ -50,6 +50,7 @@ DRIFT_TASKS = 7
 RENAMED_CPU = 55.0
 OUT_OF_RANGE_CPU = 150.0
 WORKERS_IN_BATCH = 2
+SPIDER_RESPONSES = 4
 DRIFT_ALARM = "读不回 WorkerMetrics"
 
 HEALTHY_COLUMN = {
@@ -255,3 +256,35 @@ async def test_a_genuinely_idle_cluster_still_reports_zero(monkeypatch) -> None:
 
     assert stats.avgCpu == 0.0
     assert stats.avgMemory == 0.0
+
+
+# --------------------------------------------------------------------------------------
+# 7. avgLatencyMs 是同一个形状：分母是"响应数"，不是"读得回指标的机器数"
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_cluster_that_served_no_response_reports_no_latency(monkeypatch) -> None:
+    """指标读得回来、但一条响应都没发生过时，平均延迟只能是 null。
+
+    ``0.0`` 与下面"每条响应都是 0ms"逐字节相同——同 ``avgCpu`` 的坑，只是分母换成了
+    ``total_responses``。这里的两台机器是完全健康的，不带 ``spider_stats``。
+    """
+    batch = [worker(1, "mn-a", HEALTHY_COLUMN), worker(2, "mn-b", HEALTHY_COLUMN)]
+
+    stats = await _aggregate(monkeypatch, batch)
+
+    assert stats.totalResponses == 0
+    assert stats.avgLatencyMs is None
+
+
+@pytest.mark.asyncio
+async def test_real_zero_latency_responses_still_report_zero(monkeypatch) -> None:
+    """**反判据**：真的发生过响应且延迟为 0，必须还是 0.0，不能一起吞成 null。"""
+    instant = {**HEALTHY_COLUMN, "spider_stats": {"response_count": SPIDER_RESPONSES, "avg_latency_ms": 0.0}}
+    batch = [worker(1, "mn-a", instant), worker(2, "mn-b", instant)]
+
+    stats = await _aggregate(monkeypatch, batch)
+
+    assert stats.totalResponses == SPIDER_RESPONSES * WORKERS_IN_BATCH
+    assert stats.avgLatencyMs == 0.0

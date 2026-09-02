@@ -156,7 +156,7 @@ class WorkerAggregateStats(BaseModel):
     totalResponses: int = Field(0, description="集群总响应数")
     totalItemsScraped: int = Field(0, description="集群总抓取数据项")
     totalErrors: int = Field(0, description="集群总错误数")
-    avgLatencyMs: float = Field(0.0, description="集群平均延迟(毫秒)")
+    avgLatencyMs: float | None = Field(None, description="集群平均延迟(毫秒)；null = 一条响应都没发生过")
     clusterRequestsPerMinute: float = Field(0.0, description="集群每分钟请求数")
 
 
