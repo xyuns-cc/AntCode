@@ -24,30 +24,11 @@ from antcode_core.application.services.logs.postgres_log_service import (
     postgres_log_service,
 )
 from antcode_core.application.services.logs.task_log_readers import (
-    LOG_TRUNCATED_MARKER,
-    MAX_LOG_READ_BYTES,
-    BoundedLogCollector,
     decode_stream_message,
     read_postgres_execution_logs,
     read_postgres_log_text,
     read_redis_execution_logs,
 )
-
-# P1-round6 5.3: 单次读日志的字节预算 (统一限制点)。10_000 行 * 1 MiB 单行
-# 上限 = 10 GiB Python str, 之前只在 lines 上限, 内存无护栏。默认 32 MiB
-# 与 HTTP 响应合理边界对齐; 达到即截断并在结尾追加提示行。
-_MAX_LOG_READ_BYTES = MAX_LOG_READ_BYTES
-_LOG_TRUNCATED_MARKER = LOG_TRUNCATED_MARKER
-
-
-def _join_bounded(contents: list[str]) -> str:
-    """按 UTF-8 字节预算拼接 contents, 越界立即截断并追加 marker。"""
-    collector = BoundedLogCollector()
-    for line in contents:
-        if not collector.add("stdout", line):
-            break
-    return collector.texts()[0]
-
 
 __all__ = ["TaskLogService", "task_log_service"]
 

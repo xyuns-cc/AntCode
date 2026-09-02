@@ -28,11 +28,9 @@ from antcode_web_api.deps import require_role
 from antcode_web_api.response import BaseResponse, success
 from antcode_web_api.routes.v1 import alert_config_store
 
-_SECRET_MASK = alert_config_store.SECRET_MASK
 _get_alert_config = alert_config_store.get_alert_config
 _mask_webhooks = alert_config_store.mask_webhooks
 _masked_email = alert_config_store.masked_email
-_merge_webhooks = alert_config_store.merge_webhooks
 _save_alert_config = alert_config_store.save_alert_config
 _updated_alert_fields = alert_config_store.updated_alert_fields
 
@@ -130,10 +128,6 @@ async def update_alert_config(
 
 async def _save_channel_config(channels, existing: dict, username: str) -> None:
     await alert_config_store.save_channel_config(channels, existing, username, save_config=_save_alert_config)
-
-
-async def _save_email_config(email, existing: dict, username: str) -> None:
-    await alert_config_store.save_email_config(email, existing, username, save_config=_save_alert_config)
 
 
 async def _save_rate_limit_config(config, username: str) -> None:

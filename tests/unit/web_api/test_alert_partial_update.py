@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 from antcode_core.common.serialization import from_json
 from antcode_core.domain.schemas.alert import AlertConfigRequest, AlertTestRequest, EmailConfigUpdate
-from antcode_web_api.routes.v1 import alert
+from antcode_web_api.routes.v1 import alert, alert_config_store
 from fastapi import HTTPException
 
 FEISHU_ID = "a1b2c3d4e5f6708192a3b4c5d6e7f809"
@@ -61,7 +61,7 @@ async def test_channel_partial_update_does_not_clear_omitted_channels(monkeypatc
                 {
                     "id": FEISHU_ID,
                     "name": "main",
-                    "url": alert._SECRET_MASK,
+                    "url": alert_config_store.SECRET_MASK,
                     "levels": ["ERROR"],
                     "enabled": True,
                 }
@@ -88,10 +88,11 @@ async def test_channel_partial_update_does_not_clear_omitted_channels(monkeypatc
 @pytest.mark.asyncio
 async def test_email_partial_update_preserves_secret_and_omitted_fields(monkeypatch) -> None:
     save = AsyncMock()
-    monkeypatch.setattr(alert, "_save_alert_config", save)
-    monkeypatch.setattr(alert.alert_config_store, "validate_smtp_host", lambda host: host)
+    monkeypatch.setattr(alert_config_store, "validate_smtp_host", lambda host: host)
 
-    await alert._save_email_config(EmailConfigUpdate(sender_name="new"), _stored_config(), "root")
+    await alert_config_store.save_email_config(
+        EmailConfigUpdate(sender_name="new"), _stored_config(), "root", save_config=save
+    )
 
     stored = from_json(save.await_args.kwargs["value"])
     assert stored["sender_name"] == "new"
@@ -103,10 +104,11 @@ async def test_email_partial_update_preserves_secret_and_omitted_fields(monkeypa
 @pytest.mark.parametrize("host", ["127.0.0.1", "169.254.169.254", "metadata.google.internal"])
 async def test_email_config_rejects_private_and_metadata_smtp_hosts(monkeypatch, host: str) -> None:
     save = AsyncMock()
-    monkeypatch.setattr(alert, "_save_alert_config", save)
 
     with pytest.raises(HTTPException) as exc_info:
-        await alert._save_email_config(EmailConfigUpdate(smtp_host=host), _stored_config(), "root")
+        await alert_config_store.save_email_config(
+            EmailConfigUpdate(smtp_host=host), _stored_config(), "root", save_config=save
+        )
 
     assert exc_info.value.status_code == HTTP_UNPROCESSABLE_ENTITY
     save.assert_not_awaited()
