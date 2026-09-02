@@ -185,7 +185,7 @@
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 888
+      "value": 881
     },
     {
       "path": "packages/antcode_core/src/antcode_core/application/services/crawl/test_service.py",
@@ -741,12 +741,6 @@
     },
     {
       "path": "packages/antcode_scrapy/src/antcode_scrapy/pipelines/redis_pipeline.py",
-      "function": "-",
-      "rule": "FILE_LINES",
-      "value": 311
-    },
-    {
-      "path": "packages/antcode_scrapy/src/antcode_scrapy/pipelines/redis_pipeline.py",
       "function": "AntCodeRedisPipeline._normalize_close_result",
       "rule": "PLR2004",
       "value": 1
@@ -774,12 +768,6 @@
       "function": "UniversalRuleSpider.__init__",
       "rule": "POSITIONAL_ARGS",
       "value": 4
-    },
-    {
-      "path": "packages/antcode_scrapy/src/antcode_scrapy/spiders/rule_spider.py",
-      "function": "UniversalRuleSpider._apply_rule",
-      "rule": "PLR2004",
-      "value": 1
     },
     {
       "path": "packages/antcode_scrapy/src/antcode_scrapy/spiders/rule_spider.py",
@@ -3641,7 +3629,7 @@
       "path": "web/antcode-frontend/src/pages/Dashboard/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 528
+      "value": 373
     },
     {
       "path": "web/antcode-frontend/src/pages/Projects/ProjectList.tsx",
@@ -3683,13 +3671,13 @@
       "path": "web/antcode-frontend/src/pages/Tasks/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 592
+      "value": 580
     },
     {
       "path": "web/antcode-frontend/src/pages/Workers/index.tsx",
       "function": "-",
       "rule": "FILE_LINES",
-      "value": 1079
+      "value": 1077
     }
   ]
 }
