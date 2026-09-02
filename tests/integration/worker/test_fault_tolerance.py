@@ -1393,7 +1393,7 @@ class TestConcurrentSlotsStress:
             run_id = f"concurrent-run-{task_id}"
 
             # 添加
-            await state_manager.add(run_id, f"task-{task_id}")
+            await state_manager.add_if_new(run_id, f"task-{task_id}")
 
             # 状态转换
             await state_manager.transition(run_id, RunState.PREPARING)

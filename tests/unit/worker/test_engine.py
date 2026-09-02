@@ -152,24 +152,24 @@ class TestStateManager:
     """状态管理器测试"""
 
     @pytest.mark.asyncio
-    async def test_state_manager_add_get(self):
-        """测试添加和获取"""
+    async def test_state_manager_add_if_new_get(self):
+        """测试添加和获取；重复 run_id 必须报 is_new=False（engine 靠它判重）"""
         manager = StateManager()
 
-        await manager.add("run-001", "task-001")
-        info = await manager.get("run-001")
-
-        assert info is not None
-        assert info.run_id == "run-001"
-        assert info.task_id == "task-001"
-        assert info.state == RunState.QUEUED
+        info, is_new = await manager.add_if_new("run-001", "task-001")
+        assert is_new is True
+        assert await manager.get("run-001") is info
+        assert (info.run_id, info.task_id, info.state) == ("run-001", "task-001", RunState.QUEUED)
+        again, is_new_again = await manager.add_if_new("run-001", "task-001")
+        assert is_new_again is False
+        assert again is info
 
     @pytest.mark.asyncio
     async def test_state_manager_transition(self):
         """测试状态转换"""
         manager = StateManager()
 
-        await manager.add("run-001", "task-001")
+        await manager.add_if_new("run-001", "task-001")
 
         await manager.transition("run-001", RunState.PREPARING)
         info = await manager.get("run-001")
@@ -188,7 +188,7 @@ class TestStateManager:
         """测试移除"""
         manager = StateManager()
 
-        await manager.add("run-001", "task-001")
+        await manager.add_if_new("run-001", "task-001")
         await manager.remove("run-001")
 
         info = await manager.get("run-001")
@@ -199,9 +199,9 @@ class TestStateManager:
         """测试活跃任务计数"""
         manager = StateManager()
 
-        await manager.add("run-001", "task-001")
-        await manager.add("run-002", "task-002")
-        await manager.add("run-003", "task-003")
+        await manager.add_if_new("run-001", "task-001")
+        await manager.add_if_new("run-002", "task-002")
+        await manager.add_if_new("run-003", "task-003")
 
         await manager.transition("run-001", RunState.PREPARING)
         await manager.transition("run-001", RunState.RUNNING)
@@ -270,7 +270,7 @@ class TestEngine:
         )
 
         # 手动添加任务到状态管理器
-        await engine.state_manager.add("run-001", "task-001")
+        await engine.state_manager.add_if_new("run-001", "task-001")
         await engine.scheduler.enqueue("run-001", object())
 
         # 单元测试不连接外部 Redis；归属键释放行为由专项测试覆盖。
@@ -338,7 +338,7 @@ class TestEngine:
         context.run_id = "run-1"
         context.project_id = "proj-1"
         context.labels = {}
-        await engine.state_manager.add("run-1", "task-1")
+        await engine.state_manager.add_if_new("run-1", "task-1")
 
         result = await engine._execute_task(context, task_msg)
 
@@ -384,7 +384,7 @@ class TestEngine:
             receipt="receipt-1",
         )
         result = ExecResult(run_id="run-1", status=RunStatus.SUCCESS)
-        await engine.state_manager.add("run-1", "task-1", receipt="receipt-1")
+        await engine.state_manager.add_if_new("run-1", "task-1", receipt="receipt-1")
 
         with pytest.raises(RuntimeError, match="结果上报失败"):
             await engine._report_result(context, result)
@@ -405,7 +405,7 @@ class TestEngine:
             receipt="receipt-1",
         )
         result = ExecResult(run_id="run-1", status=RunStatus.SUCCESS)
-        await engine.state_manager.add("run-1", "task-1", receipt="receipt-1")
+        await engine.state_manager.add_if_new("run-1", "task-1", receipt="receipt-1")
 
         with pytest.raises(RuntimeError, match="任务 ACK 失败"):
             await engine._report_result(context, result)

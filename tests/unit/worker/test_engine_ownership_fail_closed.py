@@ -98,7 +98,7 @@ async def test_local_duplicate_does_not_ack_active_message():
     transport.ack_task = AsyncMock()
     engine = Engine(transport=transport, executor=MagicMock())
     engine._polling = True
-    await engine.state_manager.add("run-1", "task-1", receipt="original|1-0")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="original|1-0")
     message = TaskMessage(
         task_id="task-1",
         project_id="project-1",

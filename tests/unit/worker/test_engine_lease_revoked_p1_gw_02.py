@@ -136,15 +136,15 @@ async def test_engine_cancel_all_cancels_active_runs():
     # 注入三个 run: RUNNING, QUEUED, COMPLETED(应跳过)。StateManager.add 只接
     # (run_id, task_id, receipt); 用 transition 把状态推到目标态。
     async def _seed():
-        await engine._state_manager.add("run-running", task_id="t-1")
+        await engine._state_manager.add_if_new("run-running", task_id="t-1")
         await engine._state_manager.transition("run-running", RunState.QUEUED)
         await engine._state_manager.transition("run-running", RunState.PREPARING)
         await engine._state_manager.transition("run-running", RunState.RUNNING)
 
-        await engine._state_manager.add("run-queued", task_id="t-2")
+        await engine._state_manager.add_if_new("run-queued", task_id="t-2")
         await engine._state_manager.transition("run-queued", RunState.QUEUED)
 
-        await engine._state_manager.add("run-done", task_id="t-3")
+        await engine._state_manager.add_if_new("run-done", task_id="t-3")
         await engine._state_manager.transition("run-done", RunState.QUEUED)
         await engine._state_manager.transition("run-done", RunState.PREPARING)
         await engine._state_manager.transition("run-done", RunState.RUNNING)

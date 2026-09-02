@@ -17,38 +17,15 @@ SendLog / SendLogBatch / SendLogChunk 三套 RPC 合并为 ``StreamLogs`` 单一
 
 from __future__ import annotations
 
-import time
-from typing import TYPE_CHECKING
-
 from antcode_contracts import data_pb2
 from antcode_core.application.services.workers.log_batch_validation import validate_log_batch
 from antcode_core.application.services.workers.log_ingest_fence import append_fenced_log_batch
 from antcode_core.common.log_limits import LogBatchLimits
-from antcode_core.infrastructure.redis import decode_stream_payload, log_stream_key
 from antcode_core.infrastructure.redis.control_plane import log_ingest_stream_key
 from antcode_core.infrastructure.redis.stream_client import ProtoCodec, StreamClient
 from loguru import logger
 
 from antcode_gateway.config import gateway_config
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
-
-
-def _log_type_from_proto(log_type: int) -> str:
-    """``data_pb2.LogType`` enum -> 兼容旧 log_storage 的字符串"""
-    if log_type == data_pb2.LOG_TYPE_STDERR:
-        return "stderr"
-    if log_type == data_pb2.LOG_TYPE_SYSTEM:
-        return "system"
-    return "stdout"
-
-
-def _entry_timestamp_seconds(entry: data_pb2.LogEntry) -> float:
-    if not entry.HasField("timestamp"):
-        return time.time()
-    ts = entry.timestamp
-    return ts.seconds + ts.nanos / 1e9
 
 
 def _positive_limit(name: str, value: int) -> int:
@@ -100,10 +77,6 @@ class LogHandler:
         旧 per-run stream 已废弃。
         """
         return log_ingest_stream_key()
-
-    def _legacy_per_run_stream_key(self, run_id: str) -> str:
-        """旧 per-run stream key（仅 ``get_logs`` / ``cleanup_logs`` 兼容路径用）。"""
-        return log_stream_key(run_id)
 
     async def _get_redis_client(self):
         if self._redis_client is None:
@@ -168,107 +141,3 @@ class LogHandler:
                 max_entry_content_bytes=self._max_entry_content_bytes,
             ),
         )
-
-    # =========================================================================
-    # 查询/清理 - 旧 per-run stream 的读路径。**当前无生产调用方**：web_api 不
-    # import antcode_gateway，日志查询走它自己的 streams/ + postgres_log_service。
-    # =========================================================================
-
-    async def get_logs(
-        self,
-        run_id: str,
-        start_id: str = "0",
-        count: int = 100,
-    ) -> list[dict]:
-        """从 Redis Stream 读取日志（解码 Proto LogBatch）。"""
-        redis = await self._get_redis_client()
-        if redis is None:
-            return []
-
-        try:
-            # 兼容查询：旧 per-run stream 仍有可能持有未到期日志
-            stream_key = self._legacy_per_run_stream_key(run_id)
-            messages = await redis.xrange(stream_key, min=start_id, max="+", count=count)
-
-            logs: list[dict] = []
-            for message_id, data in messages:
-                mid = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
-                payload = self._decode_log_message(data)
-                if payload is None:
-                    continue
-                for entry in payload.entries:
-                    logs.append(
-                        {
-                            "id": mid,
-                            "log_type": _log_type_from_proto(entry.log_type),
-                            "content": entry.content,
-                            "timestamp": _entry_timestamp_seconds(entry),
-                            "sequence": int(entry.sequence),
-                        }
-                    )
-            return logs
-        except Exception as exc:
-            logger.exception(f"读取日志失败: {exc}")
-            return []
-
-    def _decode_log_message(self, data: dict) -> data_pb2.LogBatch | None:
-        """从 Redis Stream 字段 dict 中解码 LogBatch。
-
-        Proto bytes 路径优先（兼容字节/字符串两种 key）；如果没有 'p' 字段，
-        回落到旧 JSON 路径并尽力构造单 entry 的 LogBatch。
-        """
-        from antcode_core.infrastructure.redis.stream_client import PROTO_FIELD
-
-        raw = data.get(PROTO_FIELD) or data.get("p")
-        if raw is not None:
-            try:
-                if isinstance(raw, str):
-                    raw = raw.encode("latin-1")  # bytes 透传
-                batch = data_pb2.LogBatch()
-                batch.ParseFromString(raw)
-                return batch
-            except Exception as exc:
-                logger.exception(f"解码 LogBatch Proto 失败: {exc}")
-                return None
-
-        # 兼容历史 JSON 帧
-        decoded = decode_stream_payload(data)
-        if "content" not in decoded:
-            return None
-        log_type = decoded.get("log_type", "stdout")
-        log_type_enum = data_pb2.LOG_TYPE_STDOUT
-        if log_type == "stderr":
-            log_type_enum = data_pb2.LOG_TYPE_STDERR
-        elif log_type == "system":
-            log_type_enum = data_pb2.LOG_TYPE_SYSTEM
-
-        entry = data_pb2.LogEntry(
-            run_id=str(decoded.get("run_id", "")),
-            log_type=log_type_enum,
-            content=str(decoded.get("content", "")),
-            sequence=int(decoded.get("sequence", 0) or 0),
-        )
-        ts_value = decoded.get("timestamp")
-        if ts_value:
-            try:
-                seconds = float(ts_value)
-                entry.timestamp.seconds = int(seconds)
-                entry.timestamp.nanos = int((seconds - int(seconds)) * 1e9)
-            except (TypeError, ValueError):
-                pass
-        return data_pb2.LogBatch(entries=[entry])
-
-    async def cleanup_logs(self, run_id: str) -> bool:
-        """清理某 run_id 的旧 per-run stream（ingest stream 是全局共享的,
-        不能按 run_id 删除,由 MAXLEN/TTL 自动 trim）。"""
-        redis = await self._get_redis_client()
-        if redis is None:
-            return False
-        try:
-            stream_key = self._legacy_per_run_stream_key(run_id)
-            await redis.delete(stream_key)
-            logger.debug(f"日志 Stream 已清理（legacy per-run）: {stream_key}")
-            return True
-        except Exception as exc:
-            logger.exception(f"清理日志 Stream 失败: {exc}")
-            return False

@@ -17,7 +17,7 @@ from antcode_worker.executor.process import ProcessExecutor
 
 
 async def _seed_running(engine: Engine, run_id: str = "run-1") -> None:
-    await engine.state_manager.add(run_id, task_id="task-1")
+    await engine.state_manager.add_if_new(run_id, task_id="task-1")
     await engine.state_manager.transition(run_id, RunState.QUEUED)
     await engine.state_manager.transition(run_id, RunState.PREPARING)
     await engine.state_manager.transition(run_id, RunState.RUNNING)

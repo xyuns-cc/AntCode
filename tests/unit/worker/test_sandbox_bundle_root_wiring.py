@@ -82,7 +82,7 @@ async def test_engine_stamps_the_fetched_bundle_root_on_the_exec_plan() -> None:
         cpu_limit_seconds=0,
         receipt=None,
     )
-    await engine.state_manager.add("run-1", "task-1")
+    await engine.state_manager.add_if_new("run-1", "task-1")
 
     await engine._execute_task(context, _source_bundle_message())
 

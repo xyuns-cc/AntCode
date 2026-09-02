@@ -66,7 +66,7 @@ class TestTaskCancellation:
         state_manager = StateManager()
 
         # 添加任务到队列
-        await state_manager.add(unique_run_id, unique_task_id)
+        await state_manager.add_if_new(unique_run_id, unique_task_id)
         info = await state_manager.get(unique_run_id)
         assert info.state == RunState.QUEUED
 
@@ -94,7 +94,7 @@ class TestTaskCancellation:
         state_manager = StateManager()
 
         # 添加任务并转换到 RUNNING 状态
-        await state_manager.add(unique_run_id, unique_task_id)
+        await state_manager.add_if_new(unique_run_id, unique_task_id)
         await state_manager.transition(unique_run_id, RunState.PREPARING)
         await state_manager.transition(unique_run_id, RunState.RUNNING)
 

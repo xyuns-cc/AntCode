@@ -144,7 +144,7 @@ async def test_engine_cancel_running_with_executor_missing_returns_true_with_war
     engine, transport = _make_engine_and_transport()
 
     # 注入一个 RUNNING run
-    await engine._state_manager.add("r-1", task_id="t-1")
+    await engine._state_manager.add_if_new("r-1", task_id="t-1")
     await engine._state_manager.transition("r-1", RunState.QUEUED)
     await engine._state_manager.transition("r-1", RunState.PREPARING)
     await engine._state_manager.transition("r-1", RunState.RUNNING)
@@ -173,7 +173,7 @@ async def test_engine_cancel_kill_failure_raises_p1_gw_05_round6():
     """
     engine, transport = _make_engine_and_transport()
 
-    await engine._state_manager.add("r-1", task_id="t-1")
+    await engine._state_manager.add_if_new("r-1", task_id="t-1")
     await engine._state_manager.transition("r-1", RunState.QUEUED)
     await engine._state_manager.transition("r-1", RunState.PREPARING)
     await engine._state_manager.transition("r-1", RunState.RUNNING)
@@ -191,7 +191,7 @@ async def test_engine_cancel_kill_failure_raises_p1_gw_05_round6():
 async def test_control_cancel_kill_failure_does_not_ack():
     """运行中 kill 失败必须保留 control receipt，不能 ACK 虚假成功。"""
     engine, transport = _make_engine_and_transport()
-    await engine._state_manager.add("r-1", task_id="t-1")
+    await engine._state_manager.add_if_new("r-1", task_id="t-1")
     await engine._state_manager.transition("r-1", RunState.QUEUED)
     await engine._state_manager.transition("r-1", RunState.PREPARING)
     await engine._state_manager.transition("r-1", RunState.RUNNING)

@@ -587,7 +587,7 @@ class TestEngineIntegration:
         state_manager = StateManager()
 
         # 添加任务
-        await state_manager.add("run-001", "task-001")
+        await state_manager.add_if_new("run-001", "task-001")
         info = await state_manager.get("run-001")
         assert info is not None
         assert info.state == RunState.QUEUED

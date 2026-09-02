@@ -192,7 +192,7 @@ async def test_cancelled_run_relays_partial_spool(tmp_path: Path) -> None:
     path = tmp_path / "spool.jsonl"
     _write_spool(path, _record("item", 1) + "\n")
     engine, context, task = _engine_fixture(path, RunStatus.CANCELLED, True)
-    await engine.state_manager.add("run-1", "task-1")
+    await engine.state_manager.add_if_new("run-1", "task-1")
 
     result = await engine._execute_task(context, task)
 
@@ -205,7 +205,7 @@ async def test_relay_failure_overrides_cancelled_result(tmp_path: Path) -> None:
     path = tmp_path / "spool.jsonl"
     _write_spool(path, _record("item", 1) + "\n")
     engine, context, task = _engine_fixture(path, RunStatus.CANCELLED, False)
-    await engine.state_manager.add("run-1", "task-1")
+    await engine.state_manager.add_if_new("run-1", "task-1")
 
     result = await engine._execute_task(context, task)
 
@@ -219,7 +219,7 @@ async def test_forced_cancel_relays_partial_spool_and_records_failure(tmp_path: 
     _write_spool(path, _record("item", 1) + "\n")
     engine, context, task = _engine_fixture(path, RunStatus.CANCELLED, False)
     engine._executor.run = AsyncMock(side_effect=asyncio.CancelledError)
-    await engine.state_manager.add("run-1", "task-1")
+    await engine.state_manager.add_if_new("run-1", "task-1")
 
     with pytest.raises(asyncio.CancelledError):
         await engine._execute_task(context, task)

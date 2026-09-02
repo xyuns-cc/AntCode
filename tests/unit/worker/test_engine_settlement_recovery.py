@@ -47,7 +47,7 @@ async def test_report_failure_redelivery_resumes_result_without_execution() -> N
     engine, transport = _engine()
     transport.report_result = AsyncMock(side_effect=[False, True])
     result = ExecResult(run_id="run-1", status=RunStatus.SUCCESS)
-    await engine.state_manager.add("run-1", "task-1", receipt="ready|1-0")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="ready|1-0")
 
     with pytest.raises(RuntimeError, match="结果上报失败"):
         await engine._report_result(_context("ready|1-0"), result)
@@ -68,7 +68,7 @@ async def test_ack_failure_redelivery_skips_already_reported_result() -> None:
     engine, transport = _engine()
     transport.ack_task = AsyncMock(side_effect=[False, True])
     result = ExecResult(run_id="run-1", status=RunStatus.SUCCESS)
-    await engine.state_manager.add("run-1", "task-1", receipt="ready|1-0")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="ready|1-0")
 
     with pytest.raises(RuntimeError, match="任务 ACK 失败"):
         await engine._report_result(_context("ready|1-0"), result)
@@ -86,7 +86,7 @@ async def test_distinct_receipt_arriving_during_failure_is_acked_without_reexecu
     engine, transport = _engine()
     transport.ack_task = AsyncMock(side_effect=[False, True, True])
     result = ExecResult(run_id="run-1", status=RunStatus.SUCCESS)
-    await engine.state_manager.add("run-1", "task-1", receipt="ready|1-0")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="ready|1-0")
 
     with pytest.raises(RuntimeError, match="任务 ACK 失败"):
         await engine._report_result(_context("ready|1-0"), result)
@@ -106,7 +106,7 @@ async def test_distinct_receipt_arriving_during_failure_is_acked_without_reexecu
 async def test_pending_settlement_is_counted_and_renewed_as_active() -> None:
     engine, _ = _engine()
     result = ExecResult(run_id="run-1", status=RunStatus.SUCCESS)
-    await engine.state_manager.add("run-1", "task-1", receipt="ready|1-0")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="ready|1-0")
     await engine.state_manager.start_settlement(
         "run-1",
         task_id="task-1",
@@ -133,7 +133,7 @@ async def test_transport_exception_keeps_settlement_recoverable(failure_stage: s
         expected_error = "ack unavailable"
         transport.ack_task = AsyncMock(side_effect=RuntimeError(expected_error))
     result = ExecResult(run_id="run-1", status=RunStatus.SUCCESS)
-    await engine.state_manager.add("run-1", "task-1", receipt="ready|1-0")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="ready|1-0")
 
     with pytest.raises(RuntimeError, match=expected_error):
         await engine._report_result(_context("ready|1-0"), result)
@@ -159,7 +159,7 @@ async def test_receipt_arriving_during_settlement_joins_same_ack_cycle() -> None
 
     transport.ack_task = AsyncMock(side_effect=ack)
     result = ExecResult(run_id="run-1", status=RunStatus.SUCCESS)
-    await engine.state_manager.add("run-1", "task-1", receipt="ready|1-0")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="ready|1-0")
     settlement = asyncio.create_task(engine._report_result(_context("ready|1-0"), result))
     await ack_started.wait()
 

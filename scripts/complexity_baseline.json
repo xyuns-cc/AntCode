@@ -854,12 +854,6 @@
       "value": 1
     },
     {
-      "path": "services/gateway/src/antcode_gateway/handlers/result.py",
-      "function": "ResultHandler.handle_status_update",
-      "rule": "POSITIONAL_ARGS",
-      "value": 6
-    },
-    {
       "path": "services/gateway/src/antcode_gateway/rate_limit.py",
       "function": "RateLimitInterceptor.__init__",
       "rule": "POSITIONAL_ARGS",

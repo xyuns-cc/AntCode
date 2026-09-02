@@ -85,7 +85,7 @@ async def test_worker_loop_self_fences_on_generation_loss():
 async def test_execute_task_does_not_convert_generation_loss_to_business_failure():
     engine = Engine(transport=MagicMock(), executor=MagicMock())
     context = RunContext(run_id="run-1", task_id="task-1", project_id="project-1")
-    await engine.state_manager.add("run-1", task_id="task-1")
+    await engine.state_manager.add_if_new("run-1", task_id="task-1")
     await engine.state_manager.transition("run-1", RunState.QUEUED)
     engine._report_running_start = AsyncMock(side_effect=GenerationLostError("superseded"))
 

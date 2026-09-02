@@ -65,7 +65,7 @@ def _engine() -> Engine:
 @pytest.mark.asyncio
 async def test_cancel_after_dequeue_marks_request_without_premature_settlement() -> None:
     engine = _engine()
-    await engine.state_manager.add("run-1", "task-1", receipt="receipt-1")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="receipt-1")
 
     cancelled = await engine.cancel("run-1", reason="race")
 
@@ -80,7 +80,7 @@ async def test_cancel_after_dequeue_marks_request_without_premature_settlement()
 @pytest.mark.asyncio
 async def test_dequeued_worker_observes_cancel_before_starting_user_code() -> None:
     engine = _engine()
-    await engine.state_manager.add("run-1", "task-1", receipt="receipt-1")
+    await engine.state_manager.add_if_new("run-1", "task-1", receipt="receipt-1")
     await engine.state_manager.request_cancel("run-1")
     context = RunContext(
         run_id="run-1",
@@ -100,7 +100,7 @@ async def test_cancel_between_running_transition_and_executor_registration_block
     engine = _engine()
     executor = _DelayedAdmissionExecutor()
     engine._executor = executor
-    await engine.state_manager.add("run-1", "task-1")
+    await engine.state_manager.add_if_new("run-1", "task-1")
     await engine.state_manager.transition("run-1", RunState.PREPARING)
     await engine.state_manager.transition("run-1", RunState.RUNNING)
     plan = ExecPlan(command="unused", run_id="run-1")
@@ -126,7 +126,7 @@ async def test_cancel_between_running_transition_and_executor_registration_block
 @pytest.mark.asyncio
 async def test_cancel_preparing_task_awaits_preparation_cleanup() -> None:
     engine = _engine()
-    await engine.state_manager.add("run-1", "task-1")
+    await engine.state_manager.add_if_new("run-1", "task-1")
     engine._report_running_start = AsyncMock()  # type: ignore[method-assign]
     engine._prepare_runtime = AsyncMock(  # type: ignore[method-assign]
         return_value=SimpleNamespace(path="/tmp", python_executable="python")
@@ -234,7 +234,7 @@ async def test_engine_stop_keeps_ownership_renewal_alive_through_settlement() ->
     engine = _engine()
     engine._running = True
     engine._scheduler.stop = AsyncMock()
-    await engine.state_manager.add("run-1", "task-1")
+    await engine.state_manager.add_if_new("run-1", "task-1")
     renewal = asyncio.create_task(asyncio.Event().wait())
     engine._ownership_renewal_task = renewal
 
