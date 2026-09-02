@@ -349,7 +349,7 @@ class TestCancellationStateTransitions:
 
         # 测试 QUEUED -> CANCELLED
         sm1 = StateManager()
-        await sm1.add(f"{unique_run_id}-1", unique_task_id)
+        await sm1.add_if_new(f"{unique_run_id}-1", unique_task_id)
         success = await sm1.transition(f"{unique_run_id}-1", RunState.CANCELLED)
         assert success is True
         info = await sm1.get(f"{unique_run_id}-1")
@@ -357,7 +357,7 @@ class TestCancellationStateTransitions:
 
         # 测试 PREPARING -> CANCELLED
         sm2 = StateManager()
-        await sm2.add(f"{unique_run_id}-2", unique_task_id)
+        await sm2.add_if_new(f"{unique_run_id}-2", unique_task_id)
         await sm2.transition(f"{unique_run_id}-2", RunState.PREPARING)
         success = await sm2.transition(f"{unique_run_id}-2", RunState.CANCELLED)
         assert success is True
@@ -366,7 +366,7 @@ class TestCancellationStateTransitions:
 
         # 测试 RUNNING -> CANCELLING -> CANCELLED
         sm3 = StateManager()
-        await sm3.add(f"{unique_run_id}-3", unique_task_id)
+        await sm3.add_if_new(f"{unique_run_id}-3", unique_task_id)
         await sm3.transition(f"{unique_run_id}-3", RunState.PREPARING)
         await sm3.transition(f"{unique_run_id}-3", RunState.RUNNING)
         success = await sm3.transition(f"{unique_run_id}-3", RunState.CANCELLING)
@@ -392,7 +392,7 @@ class TestCancellationStateTransitions:
 
         # 测试 COMPLETED -> CANCELLED（无效）
         sm1 = StateManager()
-        await sm1.add(f"{unique_run_id}-1", unique_task_id)
+        await sm1.add_if_new(f"{unique_run_id}-1", unique_task_id)
         await sm1.transition(f"{unique_run_id}-1", RunState.PREPARING)
         await sm1.transition(f"{unique_run_id}-1", RunState.RUNNING)
         await sm1.transition(f"{unique_run_id}-1", RunState.COMPLETED)
@@ -401,7 +401,7 @@ class TestCancellationStateTransitions:
 
         # 测试 FAILED -> CANCELLED（无效）
         sm2 = StateManager()
-        await sm2.add(f"{unique_run_id}-2", unique_task_id)
+        await sm2.add_if_new(f"{unique_run_id}-2", unique_task_id)
         await sm2.transition(f"{unique_run_id}-2", RunState.PREPARING)
         await sm2.transition(f"{unique_run_id}-2", RunState.FAILED)
         success = await sm2.transition(f"{unique_run_id}-2", RunState.CANCELLED)
@@ -409,7 +409,7 @@ class TestCancellationStateTransitions:
 
         # 测试 CANCELLED -> CANCELLED（无效）
         sm3 = StateManager()
-        await sm3.add(f"{unique_run_id}-3", unique_task_id)
+        await sm3.add_if_new(f"{unique_run_id}-3", unique_task_id)
         await sm3.transition(f"{unique_run_id}-3", RunState.CANCELLED)
         success = await sm3.transition(f"{unique_run_id}-3", RunState.CANCELLED)
         assert success is False  # 应该失败
@@ -429,7 +429,7 @@ class TestCancellationStateTransitions:
 
         # 测试 CANCELLING -> COMPLETED
         sm1 = StateManager()
-        await sm1.add(f"{unique_run_id}-1", unique_task_id)
+        await sm1.add_if_new(f"{unique_run_id}-1", unique_task_id)
         await sm1.transition(f"{unique_run_id}-1", RunState.PREPARING)
         await sm1.transition(f"{unique_run_id}-1", RunState.RUNNING)
         await sm1.transition(f"{unique_run_id}-1", RunState.CANCELLING)
@@ -438,7 +438,7 @@ class TestCancellationStateTransitions:
 
         # 测试 CANCELLING -> FAILED
         sm2 = StateManager()
-        await sm2.add(f"{unique_run_id}-2", unique_task_id)
+        await sm2.add_if_new(f"{unique_run_id}-2", unique_task_id)
         await sm2.transition(f"{unique_run_id}-2", RunState.PREPARING)
         await sm2.transition(f"{unique_run_id}-2", RunState.RUNNING)
         await sm2.transition(f"{unique_run_id}-2", RunState.CANCELLING)
