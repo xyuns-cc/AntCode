@@ -61,7 +61,7 @@
     "eslint-plugin-unused-imports": "4.4.1",
     "fake-indexeddb": "6.2.5",
     "globals": "^15.11.0",
-    "jsdom": "26.1.0",
+    "jsdom": "30.0.1",
     "prettier": "^3.3.3",
     "rollup-plugin-visualizer": "5.14.0",
     "terser": "^5.36.0",
